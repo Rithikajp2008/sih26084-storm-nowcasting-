@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: storm
+      POSTGRES_USER: storm
+      POSTGRES_PASSWORD: storm
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+psycopg://storm:storm@postgres:5432/storm
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8000:8000"]
+    depends_on: [postgres,redis]
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports: ["5173:5173"]
+    depends_on: [backend]
+  ml-worker:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    command: ["python","-c","print('ML worker container ready; run training/inference scripts from ml/')"]
+    env_file: [.env]
+volumes:
+  pgdata:
