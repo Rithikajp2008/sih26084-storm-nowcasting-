@@ -19,8 +19,6 @@ services:
   - type: web
     name: sih26084-storm-dashboard
     env: static
-    plan: free
-    region: singapore
     buildCommand: cd frontend && npm install && npm run build
     staticPublishPath: frontend/dist
     routes:

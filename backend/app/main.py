@@ -376,3 +376,23 @@ async def websocket_nowcast(ws: WebSocket):
             await asyncio.sleep(4)
     except (WebSocketDisconnect, RuntimeError):
         pass
+
+
+# Serve compiled React frontend if available (allows 1-click single-service cloud deploy)
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+_dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _dist_dir.exists() and (_dist_dir / "index.html").exists():
+    if (_dist_dir / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(_dist_dir / "assets")), name="frontend_assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa_frontend(full_path: str):
+        if full_path.startswith("api") or full_path.startswith("ws") or full_path.startswith("docs") or full_path == "openapi.json":
+            raise HTTPException(status_code=404, detail="Not Found")
+        target = _dist_dir / full_path
+        if target.is_file():
+            return FileResponse(target)
+        return FileResponse(_dist_dir / "index.html")
