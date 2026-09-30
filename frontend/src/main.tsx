@@ -28,7 +28,11 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
 
-const API = import.meta.env.VITE_API_URL || '';
+const API = import.meta.env.VITE_API_URL || (
+  typeof window !== 'undefined' && window.location.hostname.includes('render.com')
+    ? 'https://sih26084-storm-backend.onrender.com'
+    : ''
+);
 const WS = API
   ? API.replace(/^http/, 'ws') + '/ws/live'
   : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/live`;
