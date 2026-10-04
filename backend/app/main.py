@@ -269,7 +269,7 @@ async def get_forecast_grid(
             "status": "success",
             "mode": "demo",
             "forecast_minutes": minutes,
-            "grid_resolution": "1–3 km hyper-local spatial resolution (30 km coverage)",
+            "grid_resolution": "approx 3 km × 3 km hyper-local spatial resolution (30 km circular monitoring region)",
             "count": len(grid),
             "data": [g.model_dump(mode="json") for g in grid],
         }
@@ -291,7 +291,7 @@ async def get_forecast_grid(
         "status": "success",
         "mode": "real",
         "forecast_minutes": minutes,
-        "grid_resolution": "1–3 km hyper-local spatial resolution (30 km coverage)",
+        "grid_resolution": "approx 3 km × 3 km hyper-local spatial resolution (30 km circular monitoring region)",
         "count": len(grid),
         "data": [g.model_dump(mode="json") for g in grid],
     }

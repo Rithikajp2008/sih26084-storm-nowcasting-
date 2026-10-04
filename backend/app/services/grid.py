@@ -67,9 +67,10 @@ def clip_cell_polygon_to_circle(
     radius_km: float = 30.0,
 ) -> Optional[List[List[float]]]:
     """Geometrically clips an axis-aligned lat/lon bounding box to lie strictly
-    inside a geodesic 30 km circular boundary. Returns closed GeoJSON [lon, lat] coordinates,
-    or None if the cell is completely outside the 30 km circle.
+    inside the authoritative 30 km circular boundary (safe margin 29.95 km to prevent stroke leakage).
+    Returns closed GeoJSON [lon, lat] coordinates, or None if the cell is completely outside.
     """
+    clip_r = min(radius_km, 29.95)
     cos_lat = max(cos(radians(center_lat)), 0.20)
     
     # Convert cell bounds to local tangent plane in kilometers
@@ -78,7 +79,7 @@ def clip_cell_polygon_to_circle(
     y1 = (cell_min_lat - center_lat) * 111.0
     y2 = (cell_max_lat - center_lat) * 111.0
     
-    r_sq = radius_km * radius_km
+    r_sq = clip_r * clip_r
     
     # Check if closest point in cell to circle center is outside circle
     xc = max(x1, min(0.0, x2))
@@ -95,6 +96,12 @@ def clip_cell_polygon_to_circle(
         for cx, cy in corners:
             lat = center_lat + cy / 111.0
             lon = center_lon + cx / (111.0 * cos_lat)
+            # Safe geodesic clamp
+            d_geo = haversine_km(center_lat, center_lon, lat, lon)
+            if d_geo > clip_r:
+                scale = clip_r / max(d_geo, 0.001)
+                lat = center_lat + (lat - center_lat) * scale
+                lon = center_lon + (lon - center_lon) * scale
             coords.append([round(lon, 5), round(lat, 5)])
         coords.append(coords[0])
         return coords
@@ -126,7 +133,7 @@ def clip_cell_polygon_to_circle(
     if len(poly) < 3:
         return None
 
-    # Insert circular arc points between consecutive points that lie on the 30 km circle boundary
+    # Insert circular arc points between consecutive points that lie on the circle boundary
     out_poly = []
     n = len(poly)
     for i in range(n):
@@ -137,7 +144,7 @@ def clip_cell_polygon_to_circle(
         d1 = sqrt(p1[0] * p1[0] + p1[1] * p1[1])
         d2 = sqrt(p2[0] * p2[0] + p2[1] * p2[1])
         
-        if abs(d1 - radius_km) < 0.08 and abs(d2 - radius_km) < 0.08:
+        if abs(d1 - clip_r) < 0.12 and abs(d2 - clip_r) < 0.12:
             ang1 = atan2(p1[1], p1[0])
             ang2 = atan2(p2[1], p2[0])
             diff = (ang2 - ang1) % (2.0 * 3.141592653589793)
@@ -145,17 +152,17 @@ def clip_cell_polygon_to_circle(
                 steps = max(2, int(diff / (3.141592653589793 / 18.0)))
                 for s in range(1, steps):
                     theta = ang1 + diff * (s / steps)
-                    out_poly.append((radius_km * cos(theta), radius_km * sin(theta)))
+                    out_poly.append((clip_r * cos(theta), clip_r * sin(theta)))
 
     # Convert back to lat/lon GeoJSON coordinates
     result_coords = []
     for cx, cy in out_poly:
         lat = center_lat + cy / 111.0
         lon = center_lon + cx / (111.0 * cos_lat)
-        # Ensure geodesic distance is strictly <= radius_km (SH26084 Section 4 & 5)
+        # Ensure geodesic distance is strictly <= clip_r (SH26084 Section 4 & 5)
         d_geo = haversine_km(center_lat, center_lon, lat, lon)
-        if d_geo > radius_km:
-            scale = radius_km / d_geo
+        if d_geo > clip_r:
+            scale = clip_r / max(d_geo, 0.001)
             lat = center_lat + (lat - center_lat) * scale
             lon = center_lon + (lon - center_lon) * scale
         result_coords.append([round(lon, 5), round(lat, 5)])
@@ -172,11 +179,11 @@ def generate_hyperlocal_grid(
     real_weather: Optional[CurrentWeather] = None,
     is_analyzing: bool = False,
     radius_km: float = 30.0,
-    step_km: float = 2.8,
+    step_km: float = 3.0,
 ) -> List[GridPrediction]:
-    """Generates a high-density 1-3 km hyper-local geographic grid (~2.8 km step)
+    """Generates an approximately 3 km x 3 km hyper-local geographic grid (~3.0 km step)
     strictly clipped to the authoritative 30 km monitoring circle centered at (center_lat, center_lon).
-    No active cell visually or logically extends outside the 30 km circle (SH26084 Sections 1, 4, 5, 22).
+    No active cell visually or logically extends outside the 30 km circle (SH26084 Sections 1, 4, 5, 8, 22).
     
     Adheres strictly to the SH26084 Grid State Machine:
       - ANALYZING -> neutral blue/gray indication during telemetry processing
@@ -214,7 +221,6 @@ def generate_hyperlocal_grid(
 
     decay = max(0.3, 1.0 - (minutes / 400.0))
 
-    cell_index = 0
     for iy in range(-max_steps, max_steps + 1):
         for ix in range(-max_steps, max_steps + 1):
             cell_lat = round(center_lat + iy * step_lat, 5)
@@ -246,9 +252,7 @@ def generate_hyperlocal_grid(
             if not clipped_coords:
                 continue
                 
-            dist_to_center = haversine_km(center_lat, center_lon, cell_lat, cell_lon)
-            grid_id = f"GRID-{cell_index:03d}"
-            cell_index += 1
+            grid_id = f"GRID-R{iy + max_steps:02d}-C{ix + max_steps:02d}"
             
             geom = {
                 "type": "Polygon",
