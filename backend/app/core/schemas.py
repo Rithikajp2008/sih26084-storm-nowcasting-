@@ -2,7 +2,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, Any, Dict, List, Tuple
 
-Status = Literal["LIVE", "STALE", "NOT_CONNECTED", "ERROR", "DEMO"]
+Status = Literal["LIVE", "CONNECTED", "STALE", "NOT_CONNECTED", "ERROR", "DEMO"]
 HazardLevel = Literal["LOW", "MODERATE", "HIGH", "SEVERE"]
 WeatherStatusLevel = Literal["STABLE", "WATCH", "ALERT", "SEVERE"]
 

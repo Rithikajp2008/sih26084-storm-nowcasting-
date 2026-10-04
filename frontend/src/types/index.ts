@@ -2,7 +2,7 @@ export type Mode = 'real' | 'demo';
 
 export interface DataSourceHealth {
   name: string;
-  status: 'LIVE' | 'STALE' | 'NOT_CONNECTED' | 'ERROR' | 'DEMO';
+  status: 'LIVE' | 'CONNECTED' | 'STALE' | 'NOT_CONNECTED' | 'ERROR' | 'DEMO';
   last_update?: string;
   latency_ms?: number;
   error_count?: number;

@@ -1375,4 +1375,85 @@ body {
   background: #ef4444;
 }
 
+/* ---------------- HEALTH PANEL REMOVE & CONNECTED BADGES ---------------- */
+.btn-remove-panel {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-remove-panel:hover {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fff;
+  border-color: #ef4444;
+}
+
+.t-badge.connected {
+  background: rgba(16, 185, 129, 0.22);
+  color: #34d399;
+  border: 1px solid #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.25);
+}
+
+/* ---------------- 1-3 KM GRID OVERLAY LEGEND & INTERACTIVITY ---------------- */
+.grid-overlay-legend {
+  position: absolute;
+  bottom: 85px;
+  right: 16px;
+  z-index: 500;
+  background: rgba(10, 16, 28, 0.90);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(0, 212, 255, 0.4);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  pointer-events: auto;
+}
+
+.grid-legend-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  color: var(--accent-cyan);
+  text-transform: uppercase;
+}
+
+.grid-legend-items {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.legend-chip {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+}
+.legend-chip.safe {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid #10b981;
+}
+.legend-chip.danger {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid #ef4444;
+}
+.legend-chip.analyzing {
+  background: rgba(6, 182, 212, 0.2);
+  color: #38bdf8;
+  border: 1px solid #06b6d4;
+}
+
+
 
