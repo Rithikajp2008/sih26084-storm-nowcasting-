@@ -18,6 +18,8 @@ import {
   GridPrediction,
   UserWarning,
   WhyThisAlert,
+  RouteAnalysisResult,
+  RouteAnalyzeResponse,
 } from './types';
 
 // Fix Leaflet default marker icon paths in Vite
@@ -26,6 +28,21 @@ L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+});
+
+// Custom Route Markers
+const startIcon = L.divIcon({
+  className: 'route-marker-wrapper',
+  html: '<div class="route-marker-pin start">A</div>',
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
+});
+
+const destIcon = L.divIcon({
+  className: 'route-marker-wrapper',
+  html: '<div class="route-marker-pin dest">B</div>',
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
 });
 
 const API = import.meta.env.VITE_API_URL || (
@@ -37,21 +54,29 @@ const WS = API
   ? API.replace(/^http/, 'ws') + '/ws/live'
   : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/live`;
 
-
 const CITIES = [
   { name: '📍 Auto-Detect Current Location', lat: 13.0827, lon: 80.2707 },
-  { name: 'Chennai', lat: 13.0827, lon: 80.2707 },
-  { name: 'Mumbai', lat: 19.0760, lon: 72.8777 },
-  { name: 'New Delhi', lat: 28.6139, lon: 77.2090 },
-  { name: 'Kolkata', lat: 22.5726, lon: 88.3639 },
-  { name: 'Bengaluru', lat: 12.9716, lon: 77.5946 },
-  { name: 'Hyderabad', lat: 17.3850, lon: 78.4867 },
+  { name: 'Chennai (Tamil Nadu)', lat: 13.0827, lon: 80.2707 },
+  { name: 'Mumbai (Maharashtra)', lat: 19.0760, lon: 72.8777 },
+  { name: 'New Delhi (NCR)', lat: 28.6139, lon: 77.2090 },
+  { name: 'Kolkata (West Bengal)', lat: 22.5726, lon: 88.3639 },
+  { name: 'Bengaluru (Karnataka)', lat: 12.9716, lon: 77.5946 },
+  { name: 'Hyderabad (Telangana)', lat: 17.3850, lon: 78.4867 },
   { name: 'Guwahati (Eastern Convective Zone)', lat: 26.1445, lon: 91.7362 },
   { name: 'Bhubaneswar (Odisha Coast)', lat: 20.2961, lon: 85.8245 },
   { name: 'Coimbatore', lat: 11.0168, lon: 76.9558 },
   { name: 'Madurai', lat: 9.9252, lon: 78.1198 },
   { name: 'Pune', lat: 18.5204, lon: 73.8567 },
   { name: 'Ahmedabad', lat: 23.0225, lon: 72.5714 },
+];
+
+const PRESET_DESTINATIONS = [
+  { name: 'Tambaram Sanatorium (South Corridor)', lat: 12.9250, lon: 80.1170 },
+  { name: 'Chennai International Airport (MAA)', lat: 12.9941, lon: 80.1709 },
+  { name: 'Marina Beach Coastline', lat: 13.0500, lon: 80.2824 },
+  { name: 'Guindy Industrial Estate', lat: 13.0067, lon: 80.2026 },
+  { name: 'Avadi / Ambattur Industrial Zone', lat: 13.1147, lon: 80.1008 },
+  { name: 'Sriperumbudur Expressway Corridor', lat: 12.9675, lon: 79.9400 },
 ];
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
@@ -63,19 +88,33 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-// Controller to fly map to coordinates when location changes
-function MapRecenter({ center }: { center: [number, number] }) {
+// Controller to smoothly fly map to coordinates at practical hyper-local zoom (SIH26084 Section 4)
+function MapRecenter({ center, zoom = 11 }: { center: [number, number]; zoom?: number }) {
   const map = useMap();
   useEffect(() => {
-    map.flyTo(center, 10, { duration: 1.2 });
-  }, [center[0], center[1], map]);
+    map.flyTo(center, zoom, { duration: 1.5 });
+  }, [center[0], center[1], zoom, map]);
   return null;
 }
 
-function MapClickHandler({ onLocationSelect }: { onLocationSelect: (lat: number, lon: number) => void }) {
+function MapClickHandler({
+  onLocationSelect,
+  isPickingDest,
+  onDestSelect,
+}: {
+  onLocationSelect: (lat: number, lon: number) => void;
+  isPickingDest: boolean;
+  onDestSelect: (lat: number, lon: number) => void;
+}) {
   useMapEvents({
     click(e) {
-      onLocationSelect(Number(e.latlng.lat.toFixed(4)), Number(e.latlng.lng.toFixed(4)));
+      const cLat = Number(e.latlng.lat.toFixed(4));
+      const cLon = Number(e.latlng.lng.toFixed(4));
+      if (isPickingDest) {
+        onDestSelect(cLat, cLon);
+      } else {
+        onLocationSelect(cLat, cLon);
+      }
     },
   });
   return null;
@@ -89,12 +128,16 @@ function App() {
   const [istTime, setIstTime] = useState<string>('');
   const [errorBanner, setErrorBanner] = useState<string>('');
 
+  // Sidebar navigation tab
+  const [sidebarTab, setSidebarTab] = useState<'nowcast' | 'route'>('nowcast');
+
   // Location state (Default Chennai, but auto-detects browser GPS)
   const [selectedCity, setSelectedCity] = useState<string>('My Location');
   const [lat, setLat] = useState<number>(13.0827);
   const [lon, setLon] = useState<number>(80.2707);
   const [isLocating, setIsLocating] = useState<boolean>(false);
-  const [locationSuccess, setLocationSuccess] = useState<boolean>(false);
+  const [locationSource, setLocationSource] = useState<'gps' | 'selected' | 'denied'>('selected');
+  const [locationNotice, setLocationNotice] = useState<string>('');
 
   // Nowcast timeline state
   const [forecastMinutes, setForecastMinutes] = useState<number>(30);
@@ -104,13 +147,15 @@ function App() {
   // Map layer toggles & basemap (Default to Google Maps Roadmap - crisp, zero watermark!)
   const [basemap, setBasemap] = useState<'google-roadmap' | 'google-satellite' | 'google-terrain' | 'osm'>('google-roadmap');
   const [showGrid, setShowGrid] = useState<boolean>(true);
-  const [showRadar, setShowRadar] = useState<boolean>(true);
   const [showStorms, setShowStorms] = useState<boolean>(true);
   const [showTrajectory, setShowTrajectory] = useState<boolean>(true);
   const [showLightning, setShowLightning] = useState<boolean>(true);
   const [showCI, setShowCI] = useState<boolean>(true);
   const [showBuffer, setShowBuffer] = useState<boolean>(true);
   const [show30kmRadius, setShow30kmRadius] = useState<boolean>(true);
+
+  // Grid State Machine (SIH26084 Section 6 & 7)
+  const [isGridAnalyzing, setIsGridAnalyzing] = useState<boolean>(false);
 
   // Telemetry data
   const [health, setHealth] = useState<DataSourceHealth[]>([]);
@@ -125,32 +170,50 @@ function App() {
   const [warning, setWarning] = useState<UserWarning | null>(null);
   const [whyAlert, setWhyAlert] = useState<WhyThisAlert | null>(null);
 
-  // GPS Current Location Detection
+  // ----------------- STORM-AWARE SAFE ROUTE PLANNER STATE (Section 25) -----------------
+  const [startQuery, setStartQuery] = useState<string>('My Current Location');
+  const [destQuery, setDestQuery] = useState<string>('Tambaram Sanatorium');
+  const [startCoords, setStartCoords] = useState<[number, number]>([13.0827, 80.2707]);
+  const [destCoords, setDestCoords] = useState<[number, number]>([12.9250, 80.1170]);
+  const [isPickingDestOnMap, setIsPickingDestOnMap] = useState<boolean>(false);
+  const [isRouting, setIsRouting] = useState<boolean>(false);
+  const [routeResponse, setRouteResponse] = useState<RouteAnalyzeResponse | null>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [routeNotice, setRouteNotice] = useState<string>('');
+
+  // Critical Fix #1: GPS Current Location Detection with smooth auto-zoom
   const detectLocation = useCallback(() => {
     if (!navigator.geolocation) {
-      alert('Geolocation is not supported by your browser.');
+      setLocationNotice('Geolocation not supported by device browser.');
+      setLocationSource('denied');
       return;
     }
     setIsLocating(true);
+    setLocationNotice('Requesting browser geolocation...');
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const uLat = Number(pos.coords.latitude.toFixed(4));
         const uLon = Number(pos.coords.longitude.toFixed(4));
         setLat(uLat);
         setLon(uLon);
-        setSelectedCity(`Current Location (${uLat}°N, ${uLon}°E)`);
+        setStartCoords([uLat, uLon]);
+        setStartQuery(`📍 Live GPS (${uLat}°N, ${uLon}°E)`);
+        setSelectedCity(`📍 Live GPS Location (${uLat}°N, ${uLon}°E)`);
         setIsLocating(false);
-        setLocationSuccess(true);
+        setLocationSource('gps');
+        setLocationNotice('📍 Current device location resolved via GPS. Centering 30 km nowcast monitoring area.');
       },
       (err) => {
         console.warn('Geolocation access failed or denied:', err.message);
         setIsLocating(false);
+        setLocationSource('denied');
+        setLocationNotice('⚠️ Device location permission denied or unavailable. Centered on selected monitoring location.');
       },
       { enableHighAccuracy: true, timeout: 8000 }
     );
   }, []);
 
-  // Attempt auto-detect on initial load
+  // Attempt auto-detect on initial load (Mandatory Startup Flow, Section 4)
   useEffect(() => {
     detectLocation();
   }, [detectLocation]);
@@ -168,10 +231,12 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Main data loader
+  // Main data loader with Grid State Machine (ANALYZING -> EVALUATED)
   const loadAllData = useCallback(async () => {
     try {
       setErrorBanner('');
+      setIsGridAnalyzing(true); // Enter State A: ANALYZING (subtle light charcoal)
+
       const [mRes, hRes, cwRes, stRes, ltRes, ciRes, hzRes, rcRes, cdRes, wnRes, gdRes, whyRes] =
         await Promise.allSettled([
           fetchJson<{ data_mode: Mode }>(`${API}/api/mode`),
@@ -202,6 +267,8 @@ function App() {
       if (whyRes.status === 'fulfilled') setWhyAlert(whyRes.value.data || null);
     } catch (err: any) {
       setErrorBanner(err.message || 'Error communicating with nowcasting backend');
+    } finally {
+      setIsGridAnalyzing(false); // Transition to State B: Evaluated state
     }
   }, [lat, lon, selectedCity, forecastMinutes]);
 
@@ -253,6 +320,9 @@ function App() {
       const res = await fetchJson<{ data_mode: Mode }>(`${API}/api/mode/toggle`, { method: 'POST' });
       setMode(res.data_mode);
       void loadAllData();
+      if (routeResponse) {
+        void handleCalculateRoute();
+      }
     } catch (err: any) {
       setErrorBanner(`Failed to toggle mode: ${err.message}`);
     }
@@ -284,20 +354,67 @@ function App() {
       return;
     }
     setSelectedCity(cityName);
+    setLocationSource('selected');
     const found = CITIES.find((c) => c.name === cityName);
     if (found) {
       setLat(found.lat);
       setLon(found.lon);
+      setStartCoords([found.lat, found.lon]);
+      setStartQuery(cityName);
+      setLocationNotice(`Selected Monitoring Region: ${cityName} (Coverage: 30 km radius).`);
     }
   };
 
-  // Color helper for hazard probability
-  const getProbColor = (p: number) => {
-    if (p >= 0.75) return '#ef4444'; // Red (Severe)
-    if (p >= 0.50) return '#f59e0b'; // Amber (Alert)
-    if (p >= 0.25) return '#3b82f6'; // Blue (Watch)
-    return '#10b981'; // Green (Stable)
+  // ----------------- STORM-AWARE SAFE ROUTE PLANNER HANDLERS (Section 25) -----------------
+
+  const handleUseCurrentLocationForRoute = () => {
+    setStartCoords([lat, lon]);
+    setStartQuery(locationSource === 'gps' ? '📍 My Current Location (GPS)' : `Selected Location (${lat}°N, ${lon}°E)`);
   };
+
+  const handleSelectPresetDestination = (presetName: string) => {
+    const found = PRESET_DESTINATIONS.find((d) => d.name === presetName);
+    if (found) {
+      setDestCoords([found.lat, found.lon]);
+      setDestQuery(found.name);
+    }
+  };
+
+  const handleCalculateRoute = async () => {
+    try {
+      setIsRouting(true);
+      setRouteNotice('');
+      const payload = {
+        start: { latitude: startCoords[0], longitude: startCoords[1] },
+        destination: { latitude: destCoords[0], longitude: destCoords[1] },
+        forecast_minutes: forecastMinutes,
+      };
+
+      const res = await fetchJson<RouteAnalyzeResponse>(`${API}/api/routes/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      setRouteResponse(res);
+      if (res.recommendedRouteId) {
+        setSelectedRouteId(res.recommendedRouteId);
+      }
+      setSidebarTab('route'); // Switch view to route comparison
+      setRouteNotice(res.message || 'Storm-aware route calculated.');
+    } catch (err: any) {
+      setRouteNotice(err.message || 'Routing service unavailable. No fake routes created.');
+    } finally {
+      setIsRouting(false);
+    }
+  };
+
+  // Re-calculate route dynamically when forecast slider moves (Section 25.13 & 25.19)
+  useEffect(() => {
+    if (routeResponse && routeResponse.routes.length > 0) {
+      void handleCalculateRoute();
+    }
+  }, [forecastMinutes]);
 
   // Basemap Tile Layer - Google Maps by default, crisp and without any watermarks!
   const basemapUrl = useMemo(() => {
@@ -310,9 +427,67 @@ function App() {
     if (basemap === 'osm') {
       return 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
     }
-    // Google Maps Roadmap default: Official, clear streets, towns & zero watermark
     return 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
   }, [basemap]);
+
+  // Active highlighted route
+  const activeRoute = useMemo(() => {
+    if (!routeResponse || !routeResponse.routes || routeResponse.routes.length === 0) return null;
+    return routeResponse.routes.find((r) => r.routeId === selectedRouteId) || routeResponse.routes[0];
+  }, [routeResponse, selectedRouteId]);
+
+  const fastestRoute = useMemo(() => {
+    if (!routeResponse || !routeResponse.routes || routeResponse.routes.length === 0) return null;
+    return [...routeResponse.routes].sort((a, b) => a.durationMinutes - b.durationMinutes)[0];
+  }, [routeResponse]);
+
+  const stormAwareRoute = useMemo(() => {
+    if (!routeResponse || !routeResponse.routes || routeResponse.routes.length === 0) return null;
+    return routeResponse.routes.find((r) => r.isRecommended) || routeResponse.routes[0];
+  }, [routeResponse]);
+
+  // Grid styling adhering to Section 6 & 7 of SIH26084
+  const getGridStyle = (g: GridPrediction) => {
+    if (isGridAnalyzing || g.risk_level === 'ANALYZING' || g.status === 'ANALYZING') {
+      return {
+        fillColor: 'rgba(35, 35, 35, 0.34)', // Charcoal fill
+        color: 'rgba(30, 30, 30, 0.65)',
+        fillOpacity: 0.34,
+        weight: 1,
+      };
+    }
+    if (g.risk_level === 'DANGER' || g.status === 'DANGER' || g.storm_probability >= 0.40) {
+      return {
+        fillColor: 'rgba(235, 80, 80, 0.30)', // Light red
+        color: 'rgba(235, 80, 80, 0.75)',
+        fillOpacity: 0.30,
+        weight: 1.2,
+      };
+    }
+    if (g.risk_level === 'DATA_UNAVAILABLE' || g.status === 'DATA_UNAVAILABLE') {
+      return {
+        fillColor: 'rgba(60, 60, 60, 0.25)',
+        color: 'rgba(80, 80, 80, 0.50)',
+        fillOpacity: 0.25,
+        weight: 1,
+      };
+    }
+    // SAFE / Low-Risk cell
+    return {
+      fillColor: 'rgba(100, 190, 110, 0.30)', // Light green
+      color: 'rgba(100, 190, 110, 0.70)',
+      fillOpacity: 0.30,
+      weight: 1,
+    };
+  };
+
+  // Color helper for hazard probability
+  const getProbColor = (p: number) => {
+    if (p >= 0.75) return '#ef4444';
+    if (p >= 0.50) return '#f59e0b';
+    if (p >= 0.25) return '#3b82f6';
+    return '#10b981';
+  };
 
   return (
     <div className="command-center">
@@ -362,6 +537,13 @@ function App() {
           <span className="ticker-tag" style={{ background: '#ef4444' }}>BACKEND NOTICE</span>
           <span>{errorBanner}</span>
         </div>
+      ) : locationNotice ? (
+        <div className="alert-ticker" style={{ background: '#0e1c26', color: '#93c5fd', borderColor: '#1e3a5f' }}>
+          <span className="ticker-tag" style={{ background: locationSource === 'gps' ? '#10b981' : '#3b82f6' }}>
+            {locationSource === 'gps' ? 'GPS RESOLVED' : 'LOCATION STATUS'}
+          </span>
+          <span>{locationNotice}</span>
+        </div>
       ) : warning && warning.severity !== 'LOW' ? (
         <div className="alert-ticker">
           <span className="ticker-tag">{warning.severity} ADVISORY</span>
@@ -384,7 +566,7 @@ function App() {
               className="btn-locate"
               onClick={detectLocation}
               disabled={isLocating}
-              title="Detect your exact GPS location via browser"
+              title="Detect your exact GPS location via browser and auto-zoom"
             >
               {isLocating ? '⏳ Locating...' : '📍 My Current Location'}
             </button>
@@ -423,7 +605,7 @@ function App() {
               30 km Weather Radius
             </label>
 
-            <label className="layer-toggle">
+            <label className="layer-toggle" title="Toggle 1-3 km Hyper-Local Hazard Grid">
               <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} />
               1–3 km Hazard Grid
             </label>
@@ -447,44 +629,51 @@ function App() {
               <input type="checkbox" checked={showCI} onChange={(e) => setShowCI(e.target.checked)} />
               CI Hotspots
             </label>
+
+            {/* Quick Switch to Route Planner */}
+            <button
+              className={`btn-locate ${sidebarTab === 'route' ? 'active' : ''}`}
+              style={{ background: sidebarTab === 'route' ? 'linear-gradient(135deg, #059669 0%, #047857 100%)' : undefined }}
+              onClick={() => setSidebarTab(sidebarTab === 'route' ? 'nowcast' : 'route')}
+            >
+              🚗 {sidebarTab === 'route' ? 'View Nowcast' : 'Safe Route Planner'}
+            </button>
           </div>
 
+          {/* MAP CONTAINER - STRICT GIS LAYER ORDER (Section 9) */}
           <MapContainer
             center={[lat, lon]}
-            zoom={10}
+            zoom={11}
             className="map-container"
             scrollWheelZoom={true}
           >
+            {/* Layer 1: Base map / satellite-hybrid layer */}
             <TileLayer
               attribution='&copy; Google Maps | OpenStreetMap contributors'
               url={basemapUrl}
             />
 
-            {/* Recenter map smoothly when location changes */}
-            <MapRecenter center={[lat, lon]} />
+            {/* Recenter map smoothly with zoom 11 when location changes */}
+            <MapRecenter center={[lat, lon]} zoom={11} />
 
             <MapClickHandler
               onLocationSelect={(newLat, newLon) => {
                 setLat(newLat);
                 setLon(newLon);
                 setSelectedCity(`Selected Point (${newLat}, ${newLon})`);
+                setLocationSource('selected');
+                setLocationNotice(`Active Monitoring Point: ${newLat}°N, ${newLon}°E. Regenerating 30 km hazard grid.`);
+              }}
+              isPickingDest={isPickingDestOnMap}
+              onDestSelect={(dLat, dLon) => {
+                setDestCoords([dLat, dLon]);
+                setDestQuery(`Destination (${dLat}°N, ${dLon}°E)`);
+                setIsPickingDestOnMap(false);
+                setSidebarTab('route');
               }}
             />
 
-            {/* User Selected / Current GPS Location Marker */}
-            <Marker position={[lat, lon]}>
-              <Popup>
-                <div style={{ fontSize: 12 }}>
-                  <b style={{ color: '#0284c7' }}>📍 Current Location</b>
-                  <hr style={{ margin: '4px 0', borderColor: '#cbd5e1' }} />
-                  <div>Coordinates: <b>{lat.toFixed(4)}°N, {lon.toFixed(4)}°E</b></div>
-                  <div>Coverage: <b>30 km Radius</b></div>
-                  <div style={{ color: '#059669', marginTop: 4, fontWeight: 600 }}>Active Early-Warning Monitoring</div>
-                </div>
-              </Popup>
-            </Marker>
-
-            {/* 30 KM EARLY-WARNING & WEATHER COVERAGE RADIUS (Requested by User) */}
+            {/* Layer 2: 30 km monitoring radius */}
             {show30kmRadius && (
               <Circle
                 center={[lat, lon]}
@@ -502,7 +691,7 @@ function App() {
                     <b style={{ color: '#0284c7' }}>📍 30 km Nowcasting Coverage Radius</b>
                     <hr style={{ margin: '4px 0', borderColor: '#cbd5e1' }} />
                     <div>Center: <b>{lat.toFixed(4)}°N, {lon.toFixed(4)}°E</b></div>
-                    <div>Monitoring Area: <b>~2,827 km² around your location</b></div>
+                    <div>Monitoring Area: <b>~2,827 km² around active location</b></div>
                     <div style={{ marginTop: 4, color: '#475569' }}>Tracking thunderstorms, hail cores, downbursts & cloudbursts within 30 km.</div>
                   </div>
                 </Popup>
@@ -526,40 +715,42 @@ function App() {
               </Circle>
             )}
 
-            {/* 1–3 km Hyper-Local Hazard Grid */}
+            {/* Layer 3: 1–3 km Hyper-Local Hazard Grid (Section 5, 6, 7) */}
             {showGrid &&
               grid.map((g, i) => {
-                const color = getProbColor(g.storm_probability);
+                const style = getGridStyle(g);
                 const coords = g.geometry.coordinates[0].map((pt) => [pt[1], pt[0]] as [number, number]);
+                const cellStatus = isGridAnalyzing ? 'ANALYZING' : (g.risk_level || (g.storm_probability >= 0.4 ? 'DANGER' : 'SAFE'));
                 return (
                   <Polygon
                     key={`${g.grid_id}-${i}`}
                     positions={coords}
-                    pathOptions={{
-                      color: color,
-                      weight: 1,
-                      fillColor: color,
-                      fillOpacity: Math.max(0.12, g.storm_probability * 0.7),
-                    }}
+                    pathOptions={style}
                   >
                     <Popup>
-                      <div style={{ fontSize: 12, minWidth: 160 }}>
-                        <b style={{ color: '#00d4ff' }}>3 km Hazard Grid Cell</b> ({g.grid_id})
+                      <div style={{ fontSize: 12, minWidth: 180 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                          <b style={{ color: '#00d4ff' }}>{g.grid_id}</b>
+                          <span className={`grid-status-badge ${cellStatus.toLowerCase()}`}>
+                            {cellStatus}
+                          </span>
+                        </div>
                         <hr style={{ margin: '4px 0', borderColor: '#334155' }} />
+                        <div>Coordinates: <b>{g.center_latitude}°N, {g.center_longitude}°E</b></div>
                         <div>Storm Prob: <b>{(g.storm_probability * 100).toFixed(0)}%</b></div>
                         <div>Lightning: <b>{(g.lightning_probability * 100).toFixed(0)}%</b></div>
                         <div>Hail Prob: <b>{(g.hail_probability * 100).toFixed(0)}%</b></div>
                         <div>Heavy Rain: <b>{(g.heavy_rain_probability * 100).toFixed(0)}%</b></div>
                         <div>Severe Wind: <b>{(g.strong_wind_probability * 100).toFixed(0)}%</b></div>
                         <div>Cloudburst: <b>{(g.extreme_rain_probability * 100).toFixed(0)}%</b></div>
-                        <div style={{ marginTop: 4, color: '#94a3b8', fontSize: 10 }}>Lead Time: +{g.forecast_minutes}m</div>
+                        <div style={{ marginTop: 4, color: '#94a3b8', fontSize: 10 }}>Lead Time: +{g.forecast_minutes}m • State: {cellStatus}</div>
                       </div>
                     </Popup>
                   </Polygon>
                 );
               })}
 
-            {/* Active Storm Cells within 30 km */}
+            {/* Layer 4: Storm cells */}
             {showStorms &&
               storms.map((s) => (
                 <React.Fragment key={s.cell_id}>
@@ -608,7 +799,58 @@ function App() {
                 </React.Fragment>
               ))}
 
-            {/* 0–6h Predicted Trajectory Cone & Line */}
+            {/* Layer 5: Lightning strikes */}
+            {showLightning &&
+              lightningStrikes.map((ls) => (
+                <Circle
+                  key={ls.strike_id}
+                  center={[ls.latitude, ls.longitude]}
+                  radius={750}
+                  pathOptions={{
+                    color: '#facc15',
+                    fillColor: '#facc15',
+                    fillOpacity: Math.max(0.3, 1.0 - ls.age_seconds / 500),
+                    weight: 2,
+                  }}
+                >
+                  <Popup>
+                    <b>Lightning Stroke {ls.strike_id}</b>
+                    <br />
+                    Peak Current: <b>{ls.peak_current_ka} kA</b> ({ls.polarity})
+                    <br />
+                    Age: {ls.age_seconds}s ago
+                  </Popup>
+                </Circle>
+              ))}
+
+            {/* Layer 7: Danger / Convective Initiation Zone */}
+            {showCI && convectiveInitiation && convectiveInitiation.detected && (
+              <Circle
+                center={[convectiveInitiation.latitude + 0.05, convectiveInitiation.longitude - 0.04]}
+                radius={4500}
+                pathOptions={{
+                  color: '#8b5cf6',
+                  fillColor: '#8b5cf6',
+                  fillOpacity: 0.25,
+                  weight: 2,
+                  dashArray: '2, 6',
+                }}
+              >
+                <Popup>
+                  <b>⚡ Convective Initiation Zone</b>
+                  <br />
+                  Level: <b>{convectiveInitiation.initiation_level}</b>
+                  <br />
+                  Confidence: {(convectiveInitiation.confidence * 100).toFixed(0)}%
+                  <br />
+                  Cloud-Top Temp: {convectiveInitiation.cloud_top_temp_c}°C
+                  <br />
+                  Reflectivity Surge: +{convectiveInitiation.reflectivity_growth_dbz_per_hr} dBZ/hr
+                </Popup>
+              </Circle>
+            )}
+
+            {/* Layer 8: Storm Trajectory */}
             {showTrajectory &&
               storms.map((s) => {
                 if (!s.trajectory || s.trajectory.length === 0) return null;
@@ -647,63 +889,97 @@ function App() {
                 );
               })}
 
-            {/* Live Lightning Strikes */}
-            {showLightning &&
-              lightningStrikes.map((ls) => (
-                <Circle
-                  key={ls.strike_id}
-                  center={[ls.latitude, ls.longitude]}
-                  radius={750}
-                  pathOptions={{
-                    color: '#facc15',
-                    fillColor: '#facc15',
-                    fillOpacity: Math.max(0.3, 1.0 - ls.age_seconds / 500),
-                    weight: 2,
-                  }}
-                >
+            {/* Layer 9: Route Planner Visualization (Section 25.10) */}
+            {routeResponse && routeResponse.routes && routeResponse.routes.length > 0 && (
+              <>
+                {/* Start Marker A */}
+                <Marker position={startCoords} icon={startIcon}>
                   <Popup>
-                    <b>Lightning Stroke {ls.strike_id}</b>
-                    <br />
-                    Peak Current: <b>{ls.peak_current_ka} kA</b> ({ls.polarity})
-                    <br />
-                    Age: {ls.age_seconds}s ago
+                    <div style={{ fontSize: 12 }}>
+                      <b style={{ color: '#10b981' }}>🟢 ROUTE START (A)</b>
+                      <hr style={{ margin: '4px 0', borderColor: '#334155' }} />
+                      <div>{startQuery}</div>
+                      <div>Coordinates: <b>{startCoords[0].toFixed(4)}°N, {startCoords[1].toFixed(4)}°E</b></div>
+                    </div>
                   </Popup>
-                </Circle>
-              ))}
+                </Marker>
 
-            {/* Convective Initiation Danger Zone */}
-            {showCI && convectiveInitiation && convectiveInitiation.detected && (
-              <Circle
-                center={[convectiveInitiation.latitude + 0.05, convectiveInitiation.longitude - 0.04]}
-                radius={4500}
-                pathOptions={{
-                  color: '#8b5cf6',
-                  fillColor: '#8b5cf6',
-                  fillOpacity: 0.25,
-                  weight: 2,
-                  dashArray: '2, 6',
-                }}
-              >
-                <Popup>
-                  <b>⚡ Convective Initiation Zone</b>
-                  <br />
-                  Level: <b>{convectiveInitiation.initiation_level}</b>
-                  <br />
-                  Confidence: {(convectiveInitiation.confidence * 100).toFixed(0)}%
-                  <br />
-                  Cloud-Top Temp: {convectiveInitiation.cloud_top_temp_c}°C
-                  <br />
-                  Reflectivity Surge: +{convectiveInitiation.reflectivity_growth_dbz_per_hr} dBZ/hr
-                </Popup>
-              </Circle>
+                {/* Destination Marker B */}
+                <Marker position={destCoords} icon={destIcon}>
+                  <Popup>
+                    <div style={{ fontSize: 12 }}>
+                      <b style={{ color: '#ef4444' }}>🔴 DESTINATION (B)</b>
+                      <hr style={{ margin: '4px 0', borderColor: '#334155' }} />
+                      <div>{destQuery}</div>
+                      <div>Coordinates: <b>{destCoords[0].toFixed(4)}°N, {destCoords[1].toFixed(4)}°E</b></div>
+                    </div>
+                  </Popup>
+                </Marker>
+
+                {/* Route Polylines */}
+                {routeResponse.routes.map((rt) => {
+                  const isSelected = rt.routeId === selectedRouteId || (rt.isRecommended && !selectedRouteId);
+                  const isRec = rt.isRecommended;
+                  const lineColor = isRec ? '#00e676' : isSelected ? '#38bdf8' : '#f59e0b';
+                  const weight = isSelected ? 6 : 4;
+                  const dashArray = isRec ? undefined : '6, 6';
+
+                  return (
+                    <Polyline
+                      key={rt.routeId}
+                      positions={rt.coordinates}
+                      pathOptions={{
+                        color: lineColor,
+                        weight: weight,
+                        dashArray: dashArray,
+                        opacity: isSelected ? 0.95 : 0.65,
+                      }}
+                      eventHandlers={{
+                        click: () => setSelectedRouteId(rt.routeId),
+                      }}
+                    >
+                      <Popup>
+                        <div style={{ fontSize: 12, minWidth: 200 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <b style={{ color: isRec ? '#34d399' : '#f59e0b' }}>{rt.name}</b>
+                            <span className={`risk-pill ${rt.riskLevel.toLowerCase()}`}>
+                              {rt.riskLevel}
+                            </span>
+                          </div>
+                          <hr style={{ margin: '4px 0', borderColor: '#334155' }} />
+                          <div>Duration: <b>{rt.durationMinutes} min</b> • Distance: <b>{rt.distanceKm} km</b></div>
+                          <div>Storm Exposure Score: <b>{rt.riskScore}/100</b></div>
+                          {rt.tradeOffText && <div style={{ color: '#38bdf8', marginTop: 3 }}>Trade-off: {rt.tradeOffText}</div>}
+                          <div style={{ color: '#cbd5e1', fontSize: 11, marginTop: 4 }}>{rt.recommendationReason || rt.notSelectedReason}</div>
+                        </div>
+                      </Popup>
+                    </Polyline>
+                  );
+                })}
+              </>
             )}
+
+            {/* Layer 10: Current-location marker (Top-most layer) */}
+            <Marker position={[lat, lon]}>
+              <Popup>
+                <div style={{ fontSize: 12 }}>
+                  <b style={{ color: '#0284c7' }}>
+                    {locationSource === 'gps' ? '📍 Live GPS Location' : '📍 Selected Monitoring Location'}
+                  </b>
+                  <hr style={{ margin: '4px 0', borderColor: '#cbd5e1' }} />
+                  <div>Coordinates: <b>{lat.toFixed(4)}°N, {lon.toFixed(4)}°E</b></div>
+                  <div>Coverage: <b>30 km Active Radius</b></div>
+                  <div style={{ color: '#059669', marginTop: 4, fontWeight: 600 }}>Active Early-Warning Monitoring</div>
+                </div>
+              </Popup>
+            </Marker>
           </MapContainer>
 
           {/* Map Bottom Legend */}
           <div className="map-legend-bar">
             <div className="legend-title">
               <span>DWR REFLECTIVITY (dBZ)</span>
-              <span>1–3 KM CONVECTIVE CORE</span>
+              <span>1–3 KM CONVECTIVE CORE & HAZARD GRID</span>
             </div>
             <div className="legend-scale">
               <div className="legend-step" style={{ background: '#3b82f6' }} title="20 dBZ Light Rain" />
@@ -724,418 +1000,631 @@ function App() {
           </div>
         </section>
 
-        {/* RIGHT: TACTICAL CONTROL PANEL */}
+        {/* RIGHT: TACTICAL CONTROL PANEL / ROUTE PLANNER */}
         <aside className="tactical-sidebar">
-          {/* A. Weather Status Indicator */}
-          {currentWeather && (
-            <div className={`status-banner ${currentWeather.status_level.toLowerCase()}`}>
-              <div className="status-head">
-                <span className="status-title">STATUS: {currentWeather.status_level}</span>
-                <span className="t-badge" style={{ background: 'rgba(0,0,0,0.3)', color: '#fff' }}>
-                  {currentWeather.weather_condition}
-                </span>
-              </div>
-              <div className="status-reason">{currentWeather.status_reason}</div>
-            </div>
-          )}
+          {/* Sidebar Tab Switcher */}
+          <div className="sidebar-tabs">
+            <button
+              className={`sidebar-tab-btn ${sidebarTab === 'nowcast' ? 'active' : ''}`}
+              onClick={() => setSidebarTab('nowcast')}
+            >
+              ⚡ 30 KM NOWCAST
+            </button>
+            <button
+              className={`sidebar-tab-btn ${sidebarTab === 'route' ? 'active' : ''}`}
+              onClick={() => setSidebarTab('route')}
+            >
+              🚗 SAFE ROUTE PLANNER
+            </button>
+          </div>
 
-          {/* B. Storm Arrival Countdown */}
-          <div className="t-card">
-            <div className="t-card-header">
-              <div className="t-card-title">
-                <span>⏱️</span> STORM ARRIVAL COUNTDOWN
-              </div>
-              <span className="t-badge alert">ETA TELEMETRY</span>
-            </div>
-            {countdown && countdown.active_storm_detected ? (
-              <div className="countdown-box">
-                <div className="countdown-time">{countdown.countdown_str}</div>
-                <div className="countdown-sub">
-                  <span>Dist: <b>{countdown.distance_km} km</b></span>
-                  <span>Approach: <b>{countdown.direction_compass}</b></span>
-                  <span>Confidence: <b>{countdown.confidence_percent}%</b></span>
+          {/* TAB 1: NOWCAST DASHBOARD */}
+          {sidebarTab === 'nowcast' && (
+            <>
+              {/* Weather Status Indicator */}
+              {currentWeather && (
+                <div className={`status-banner ${currentWeather.status_level.toLowerCase()}`}>
+                  <div className="status-head">
+                    <span className="status-title">STATUS: {currentWeather.status_level}</span>
+                    <span className="t-badge" style={{ background: 'rgba(0,0,0,0.3)', color: '#fff' }}>
+                      {currentWeather.weather_condition}
+                    </span>
+                  </div>
+                  <div className="status-reason">{currentWeather.status_reason}</div>
                 </div>
-                {countdown.arrival_clock_time && (
-                  <div style={{ marginTop: 6, fontSize: 11, color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>
-                    Est. Arrival Time: {countdown.arrival_clock_time}
+              )}
+
+              {/* Storm Arrival Countdown */}
+              <div className="t-card">
+                <div className="t-card-header">
+                  <div className="t-card-title">
+                    <span>⏱️</span> STORM ARRIVAL COUNTDOWN
+                  </div>
+                  <span className="t-badge alert">ETA TELEMETRY</span>
+                </div>
+                {countdown && countdown.active_storm_detected ? (
+                  <div className="countdown-box">
+                    <div className="countdown-time">{countdown.countdown_str}</div>
+                    <div className="countdown-sub">
+                      <span>Dist: <b>{countdown.distance_km} km</b></span>
+                      <span>Approach: <b>{countdown.direction_compass}</b></span>
+                      <span>Confidence: <b>{countdown.confidence_percent}%</b></span>
+                    </div>
+                    {countdown.arrival_clock_time && (
+                      <div style={{ marginTop: 6, fontSize: 11, color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>
+                        Est. Arrival Time: {countdown.arrival_clock_time}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ padding: 12, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                    No active convective storm cell intersecting 3 km buffer.
                   </div>
                 )}
               </div>
-            ) : (
-              <div style={{ padding: 12, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                No active convective storm cell intersecting 3 km buffer.
-              </div>
-            )}
-          </div>
 
-          {/* Active Storms & Trend Tracking (SIH26084 Section 6) */}
-          {storms.length > 0 && (
-            <div className="t-card">
-              <div className="t-card-header">
-                <div className="t-card-title">
-                  <span>🌀</span> STORM CELLS & TREND TRACKING
-                </div>
-                <span className="t-badge alert">{storms.length} ACTIVE</span>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {storms.map((st) => (
-                  <div
-                    key={st.cell_id}
-                    style={{
-                      background: 'rgba(255,255,255,0.03)',
-                      padding: '8px 10px',
-                      borderRadius: 6,
-                      border: '1px solid rgba(255,255,255,0.06)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <b style={{ color: '#f87171', fontSize: 12 }}>{st.cell_id}</b>
-                      <span className={`storm-trend-badge ${st.trend?.toLowerCase() || 'intensifying'}`}>
-                        {st.trend === 'INTENSIFYING' ? '🔥 INTENSIFYING' : st.trend === 'WEAKENING' ? '📉 WEAKENING' : '⚖️ STABLE'}
-                      </span>
+              {/* Active Storms & Trend Tracking */}
+              {storms.length > 0 && (
+                <div className="t-card">
+                  <div className="t-card-header">
+                    <div className="t-card-title">
+                      <span>🌀</span> STORM CELLS & TREND TRACKING
                     </div>
-                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
-                      <span>Core: <b style={{ color: '#ec4899' }}>{st.reflectivity_max_dbz} dBZ</b></span>
-                      <span>Motion: <b>{st.speed_kmh} km/h @ {st.direction_compass}</b></span>
-                      <span>Radius: <b>{st.radius_km} km</b></span>
-                    </div>
+                    <span className="t-badge alert">{storms.length} ACTIVE</span>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* C. "Rain Coming?" Feature */}
-          <div className="t-card">
-            <div className="t-card-header">
-              <div className="t-card-title">
-                <span>🌧️</span> RAIN COMING?
-              </div>
-              <span className={`t-badge ${rainComing?.expected ? 'severe' : 'stable'}`}>
-                {rainComing?.expected ? 'CONFIRMED' : 'CLEAR'}
-              </span>
-            </div>
-            {rainComing && (
-              <div>
-                <div className={`rain-verdict ${rainComing.expected ? '' : 'no-rain'}`}>
-                  <div className="rain-headline">
-                    {rainComing.expected
-                      ? `YES – HIGH PROBABILITY (${rainComing.probability_percent}%)`
-                      : 'NO SIGNIFICANT RAINFALL EXPECTED'}
-                  </div>
-                  {rainComing.expected && (
-                    <div className="rain-meta">
-                      Expected Arrival: <b>{rainComing.arrival_minutes ? `${rainComing.arrival_minutes} min` : 'Underway'}</b> • Intensity: <b>{rainComing.expected_intensity}</b> • Duration: <b>{rainComing.expected_duration_min}</b>
-                    </div>
-                  )}
-                </div>
-
-                <div className="outlook-bars">
-                  {[
-                    { label: '+15m', val: rainComing.outlook_15m },
-                    { label: '+30m', val: rainComing.outlook_30m },
-                    { label: '+1h', val: rainComing.outlook_1h },
-                    { label: '+3h', val: rainComing.outlook_3h },
-                    { label: '+6h', val: rainComing.outlook_6h },
-                  ].map((ob) => (
-                    <div className="outlook-bar-item" key={ob.label}>
-                      <div className="bar-time">{ob.label}</div>
-                      <div className="bar-container">
-                        <div className="bar-fill" style={{ height: `${ob.val}%` }} />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {storms.map((st) => (
+                      <div
+                        key={st.cell_id}
+                        style={{
+                          background: 'rgba(255,255,255,0.03)',
+                          padding: '8px 10px',
+                          borderRadius: 6,
+                          border: '1px solid rgba(255,255,255,0.06)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <b style={{ color: '#f87171', fontSize: 12 }}>{st.cell_id}</b>
+                          <span className={`storm-trend-badge ${st.trend?.toLowerCase() || 'intensifying'}`}>
+                            {st.trend === 'INTENSIFYING' ? '🔥 INTENSIFYING' : st.trend === 'WEAKENING' ? '📉 WEAKENING' : '⚖️ STABLE'}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
+                          <span>Core: <b style={{ color: '#ec4899' }}>{st.reflectivity_max_dbz} dBZ</b></span>
+                          <span>Motion: <b>{st.speed_kmh} km/h @ {st.direction_compass}</b></span>
+                          <span>Radius: <b>{st.radius_km} km</b></span>
+                        </div>
                       </div>
-                      <div className="bar-pct">{ob.val}%</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* "Rain Coming?" Feature */}
+              <div className="t-card">
+                <div className="t-card-header">
+                  <div className="t-card-title">
+                    <span>🌧️</span> RAIN COMING?
+                  </div>
+                  <span className={`t-badge ${rainComing?.expected ? 'severe' : 'stable'}`}>
+                    {rainComing?.expected ? 'CONFIRMED' : 'CLEAR'}
+                  </span>
+                </div>
+                {rainComing && (
+                  <div>
+                    <div className={`rain-verdict ${rainComing.expected ? '' : 'no-rain'}`}>
+                      <div className="rain-headline">
+                        {rainComing.expected
+                          ? `YES – HIGH PROBABILITY (${rainComing.probability_percent}%)`
+                          : 'NO SIGNIFICANT RAINFALL EXPECTED'}
+                      </div>
+                      {rainComing.expected && (
+                        <div className="rain-meta">
+                          Expected Arrival: <b>{rainComing.arrival_minutes ? `${rainComing.arrival_minutes} min` : 'Underway'}</b> • Intensity: <b>{rainComing.expected_intensity}</b> • Duration: <b>{rainComing.expected_duration_min}</b>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="outlook-bars">
+                      {[
+                        { label: '+15m', val: rainComing.outlook_15m },
+                        { label: '+30m', val: rainComing.outlook_30m },
+                        { label: '+1h', val: rainComing.outlook_1h },
+                        { label: '+3h', val: rainComing.outlook_3h },
+                        { label: '+6h', val: rainComing.outlook_6h },
+                      ].map((ob) => (
+                        <div className="outlook-bar-item" key={ob.label}>
+                          <div className="bar-time">{ob.label}</div>
+                          <div className="bar-container">
+                            <div className="bar-fill" style={{ height: `${ob.val}%` }} />
+                          </div>
+                          <div className="bar-pct">{ob.val}%</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Current Weather Panel */}
+              {currentWeather && (
+                <div className="t-card">
+                  <div className="t-card-header">
+                    <div className="t-card-title">
+                      <span>🌡️</span> CURRENT WEATHER (30 KM RADIUS)
+                    </div>
+                    <span className="t-badge watch">30 KM ZONE</span>
+                  </div>
+                  <div className="weather-grid">
+                    <div className="w-item">
+                      <div className="w-label">Temperature</div>
+                      <div className="w-value">{currentWeather.temperature.toFixed(1)}<span className="w-unit">°C</span></div>
+                    </div>
+                    <div className="w-item">
+                      <div className="w-label">Humidity</div>
+                      <div className="w-value">{currentWeather.humidity.toFixed(0)}<span className="w-unit">%</span></div>
+                    </div>
+                    <div className="w-item">
+                      <div className="w-label">Wind</div>
+                      <div className="w-value">{currentWeather.wind_speed.toFixed(0)}<span className="w-unit">km/h {currentWeather.wind_direction_compass}</span></div>
+                    </div>
+                    <div className="w-item">
+                      <div className="w-label">Pressure</div>
+                      <div className="w-value">{currentWeather.pressure.toFixed(1)}<span className="w-unit">hPa</span></div>
+                    </div>
+                    <div className="w-item">
+                      <div className="w-label">Rainfall Rate</div>
+                      <div className="w-value">{currentWeather.rainfall_rate_mm_h.toFixed(1)}<span className="w-unit">mm/h</span></div>
+                    </div>
+                    <div className="w-item">
+                      <div className="w-label">Cloud Cover</div>
+                      <div className="w-value">{currentWeather.cloud_cover_percent?.toFixed(0) || '—'}<span className="w-unit">%</span></div>
+                    </div>
+                  </div>
+                  <div className="w-attribution">
+                    <span>Location: {selectedCity} ({lat.toFixed(2)}°N, {lon.toFixed(2)}°E)</span>
+                    <span>{new Date(currentWeather.observation_timestamp).toLocaleTimeString()}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Convective Initiation (CI) Alert Card */}
+              {convectiveInitiation && (
+                <div className="t-card">
+                  <div className="t-card-header">
+                    <div className="t-card-title">
+                      <span>⚡</span> CONVECTIVE INITIATION (CI)
+                    </div>
+                    <span className={`t-badge ${convectiveInitiation.detected ? 'severe' : 'stable'}`}>
+                      {convectiveInitiation.initiation_level}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#e2e8f0', marginBottom: 8 }}>
+                    Region: <b>Within 30 km Radius</b> • Confidence: <b>{(convectiveInitiation.confidence * 100).toFixed(0)}%</b>
+                  </div>
+                  <div style={{ background: 'rgba(0,0,0,0.25)', padding: 8, borderRadius: 6, fontSize: 11, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {convectiveInitiation.primary_signals.map((sig, idx) => (
+                      <div key={idx} style={{ display: 'flex', gap: 6, color: '#cbd5e1' }}>
+                        <span style={{ color: '#00d4ff' }}>▶</span>
+                        <span>{sig}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* The 5 SIH26084 Hazard Summary Cards */}
+              {hazards && (
+                <div className="t-card">
+                  <div className="t-card-header">
+                    <div className="t-card-title">
+                      <span>⚠️</span> 30 KM HAZARD ASSESSMENT (+{forecastMinutes}m)
+                    </div>
+                    <span className="t-badge alert">5 HAZARDS</span>
+                  </div>
+                  <div className="hazard-list">
+                    <div className="hazard-row">
+                      <span className="hazard-name">Thunderstorm</span>
+                      <div className="hazard-meter-box">
+                        <div className="hazard-progress">
+                          <div className="hazard-bar" style={{ width: `${hazards.thunderstorm_probability * 100}%`, background: getProbColor(hazards.thunderstorm_probability) }} />
+                        </div>
+                      </div>
+                      <span className="hazard-meta"><b>{(hazards.thunderstorm_probability * 100).toFixed(0)}%</b></span>
+                    </div>
+
+                    <div className="hazard-row">
+                      <span className="hazard-name">Lightning</span>
+                      <div className="hazard-meter-box">
+                        <div className="hazard-progress">
+                          <div className="hazard-bar" style={{ width: `${hazards.lightning_probability * 100}%`, background: getProbColor(hazards.lightning_probability) }} />
+                        </div>
+                      </div>
+                      <span className="hazard-meta"><b>{(hazards.lightning_probability * 100).toFixed(0)}%</b></span>
+                    </div>
+
+                    <div className="hazard-row">
+                      <span className="hazard-name">Hail Hazard</span>
+                      <div className="hazard-meter-box">
+                        <div className="hazard-progress">
+                          <div className="hazard-bar" style={{ width: `${hazards.hail_probability * 100}%`, background: getProbColor(hazards.hail_probability) }} />
+                        </div>
+                      </div>
+                      <span className="hazard-meta"><b>{(hazards.hail_probability * 100).toFixed(0)}%</b></span>
+                    </div>
+
+                    <div className="hazard-row">
+                      <span className="hazard-name">Downburst / Wind</span>
+                      <div className="hazard-meter-box">
+                        <div className="hazard-progress">
+                          <div className="hazard-bar" style={{ width: `${hazards.downburst_probability * 100}%`, background: getProbColor(hazards.downburst_probability) }} />
+                        </div>
+                      </div>
+                      <span className="hazard-meta"><b>{hazards.downburst_max_gust_kmh} km/h</b></span>
+                    </div>
+
+                    <div className="hazard-row">
+                      <span className="hazard-name">Cloudburst / Rain</span>
+                      <div className="hazard-meter-box">
+                        <div className="hazard-progress">
+                          <div className="hazard-bar" style={{ width: `${hazards.cloudburst_probability * 100}%`, background: getProbColor(hazards.cloudburst_probability) }} />
+                        </div>
+                      </div>
+                      <span className="hazard-meta"><b>{hazards.cloudburst_rate_mm_per_hr} mm/h</b></span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Local Hazard Warning Card with WHAT / WHY / WHEN */}
+              {warning && (
+                <div className="t-card" style={{ borderColor: warning.severity === 'SEVERE' ? '#ef4444' : '#334155' }}>
+                  <div className="t-card-header">
+                    <div className="t-card-title">
+                      <span>🚨</span> LOCAL HAZARD ADVISORY
+                    </div>
+                    <span className={`t-badge ${warning.severity.toLowerCase()}`}>{warning.severity}</span>
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc', marginBottom: 6 }}>
+                    {warning.headline}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.4, marginBottom: 8 }}>
+                    <b>Guideline:</b> {warning.operational_attention}
+                  </div>
+
+                  <div className="what-why-when-box">
+                    <div className="www-head">⚡ WHAT / WHY / WHEN OPERATIONAL TRIAGE</div>
+                    <div className="www-row">
+                      <div className="www-pill what">WHAT?</div>
+                      <div className="www-content"><b>{warning.what_hazard || warning.headline}</b></div>
+                    </div>
+                    <div className="www-row">
+                      <div className="www-pill why">WHY?</div>
+                      <div className="www-content"><span>{warning.why_reason || warning.operational_attention}</span></div>
+                    </div>
+                    <div className="www-row">
+                      <div className="www-pill when">WHEN?</div>
+                      <div className="www-content"><span>{warning.when_expected || (warning.eta_minutes ? `Imminent within ~${warning.eta_minutes} min` : 'Next 60–90 min stable')}</span></div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Explainable Predictions */}
+              {whyAlert && (
+                <div className="t-card">
+                  <div className="t-card-header">
+                    <div className="t-card-title">
+                      <span>💡</span> WHY THIS ALERT? (EXPLAINABILITY)
+                    </div>
+                    <span className="t-badge watch">AI REASONING</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {whyAlert.primary_factors.map((f, idx) => (
+                      <div key={idx} style={{ background: 'rgba(255,255,255,0.03)', padding: 6, borderRadius: 4, fontSize: 11 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', color: '#00d4ff', fontWeight: 600 }}>
+                          <span>{f.factor}</span>
+                          <span>{f.weight_percent}% impact</span>
+                        </div>
+                        <div style={{ color: '#cbd5e1', fontSize: 10, marginTop: 2 }}>{f.observation}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Data-Source Health & Provenance Panel */}
+              <div className="t-card">
+                <div className="t-card-header">
+                  <div className="t-card-title">
+                    <span>📡</span> DATA-SOURCE HEALTH PANEL
+                  </div>
+                  <span className="t-badge watch">{mode === 'demo' ? 'SIMULATED FEEDS' : 'REAL FEEDS'}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {health.map((h) => (
+                    <div
+                      key={h.name}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '4px 0',
+                        borderBottom: '1px solid rgba(255,255,255,0.04)',
+                        fontSize: 11,
+                      }}
+                      title={h.message || ''}
+                    >
+                      <span style={{ color: '#e2e8f0' }}>{h.name}</span>
+                      <span
+                        className={`t-badge ${
+                          h.status === 'LIVE' ? 'stable' : h.status === 'DEMO' ? 'alert' : 'watch'
+                        }`}
+                      >
+                        {h.status}
+                      </span>
                     </div>
                   ))}
                 </div>
               </div>
-            )}
-          </div>
-
-          {/* D. Current Weather Panel (Within 30 km Radius) */}
-          {currentWeather && (
-            <div className="t-card">
-              <div className="t-card-header">
-                <div className="t-card-title">
-                  <span>🌡️</span> CURRENT WEATHER (30 KM RADIUS OF YOUR LOCATION)
-                </div>
-                <span className="t-badge watch">30 KM ZONE</span>
-              </div>
-              <div className="weather-grid">
-                <div className="w-item">
-                  <div className="w-label">Temperature</div>
-                  <div className="w-value">{currentWeather.temperature.toFixed(1)}<span className="w-unit">°C</span></div>
-                </div>
-                <div className="w-item">
-                  <div className="w-label">Humidity</div>
-                  <div className="w-value">{currentWeather.humidity.toFixed(0)}<span className="w-unit">%</span></div>
-                </div>
-                <div className="w-item">
-                  <div className="w-label">Wind</div>
-                  <div className="w-value">{currentWeather.wind_speed.toFixed(0)}<span className="w-unit">km/h {currentWeather.wind_direction_compass}</span></div>
-                </div>
-                <div className="w-item">
-                  <div className="w-label">Pressure</div>
-                  <div className="w-value">{currentWeather.pressure.toFixed(1)}<span className="w-unit">hPa</span></div>
-                </div>
-                <div className="w-item">
-                  <div className="w-label">Rainfall Rate</div>
-                  <div className="w-value">{currentWeather.rainfall_rate_mm_h.toFixed(1)}<span className="w-unit">mm/h</span></div>
-                </div>
-                <div className="w-item">
-                  <div className="w-label">Cloud Cover</div>
-                  <div className="w-value">{currentWeather.cloud_cover_percent?.toFixed(0) || '—'}<span className="w-unit">%</span></div>
-                </div>
-              </div>
-              <div className="w-attribution">
-                <span>Location: {selectedCity} ({lat.toFixed(2)}°N, {lon.toFixed(2)}°E)</span>
-                <span>{new Date(currentWeather.observation_timestamp).toLocaleTimeString()}</span>
-              </div>
-            </div>
+            </>
           )}
 
-          {/* E. Convective Initiation (CI) Alert Card */}
-          {convectiveInitiation && (
-            <div className="t-card">
-              <div className="t-card-header">
-                <div className="t-card-title">
-                  <span>⚡</span> CONVECTIVE INITIATION (CI)
+          {/* TAB 2: STORM-AWARE SAFE ROUTE PLANNER (SIH26084 Section 25) */}
+          {sidebarTab === 'route' && (
+            <div className="route-planner-container">
+              {/* Form Card */}
+              <div className="route-form-card">
+                <div className="t-card-title" style={{ fontSize: 13 }}>
+                  <span>🚗</span> STORM-AWARE SAFE ROUTE
                 </div>
-                <span className={`t-badge ${convectiveInitiation.detected ? 'severe' : 'stable'}`}>
-                  {convectiveInitiation.initiation_level}
-                </span>
-              </div>
-              <div style={{ fontSize: 11, color: '#e2e8f0', marginBottom: 8 }}>
-                Region: <b>Within 30 km Radius</b> • Confidence: <b>{(convectiveInitiation.confidence * 100).toFixed(0)}%</b>
-              </div>
-              <div style={{ background: 'rgba(0,0,0,0.25)', padding: 8, borderRadius: 6, fontSize: 11, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {convectiveInitiation.primary_signals.map((sig, idx) => (
-                  <div key={idx} style={{ display: 'flex', gap: 6, color: '#cbd5e1' }}>
-                    <span style={{ color: '#00d4ff' }}>▶</span>
-                    <span>{sig}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
-          {/* F. The 5 SIH26084 Hazard Summary Cards */}
-          {hazards && (
-            <div className="t-card">
-              <div className="t-card-header">
-                <div className="t-card-title">
-                  <span>⚠️</span> 30 KM HAZARD ASSESSMENT (+{forecastMinutes}m)
+                {/* From Input */}
+                <div className="route-input-group">
+                  <div className="route-input-label">
+                    <span>FROM:</span>
+                    <button className="btn-use-curr-loc" onClick={handleUseCurrentLocationForRoute}>
+                      [ Use My Current Location ]
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    className="route-input-field"
+                    value={startQuery}
+                    onChange={(e) => setStartQuery(e.target.value)}
+                    placeholder="Enter start location or click button above"
+                  />
                 </div>
-                <span className="t-badge alert">5 HAZARDS</span>
-              </div>
-              <div className="hazard-list">
-                {/* 1. Thunderstorm */}
-                <div className="hazard-row">
-                  <span className="hazard-name">Thunderstorm</span>
-                  <div className="hazard-meter-box">
-                    <div className="hazard-progress">
-                      <div
-                        className="hazard-bar"
+
+                {/* To Input */}
+                <div className="route-input-group">
+                  <div className="route-input-label">
+                    <span>TO:</span>
+                    <button
+                      className="btn-use-curr-loc"
+                      style={{ color: isPickingDestOnMap ? '#facc15' : '#38bdf8' }}
+                      onClick={() => setIsPickingDestOnMap(!isPickingDestOnMap)}
+                    >
+                      {isPickingDestOnMap ? '🎯 Click on Map now...' : '🎯 Pick on Map'}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    className="route-input-field"
+                    value={destQuery}
+                    onChange={(e) => setDestQuery(e.target.value)}
+                    placeholder="Enter destination"
+                  />
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                    {PRESET_DESTINATIONS.slice(0, 3).map((p) => (
+                      <button
+                        key={p.name}
+                        onClick={() => handleSelectPresetDestination(p.name)}
                         style={{
-                          width: `${hazards.thunderstorm_probability * 100}%`,
-                          background: getProbColor(hazards.thunderstorm_probability),
+                          background: 'rgba(255,255,255,0.05)',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          color: '#cbd5e1',
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          fontSize: 9,
+                          cursor: 'pointer',
                         }}
-                      />
-                    </div>
-                  </div>
-                  <span className="hazard-meta">
-                    <b>{(hazards.thunderstorm_probability * 100).toFixed(0)}%</b> ({hazards.thunderstorm_severity})
-                  </span>
-                </div>
-
-                {/* 2. Lightning */}
-                <div className="hazard-row">
-                  <span className="hazard-name">Lightning</span>
-                  <div className="hazard-meter-box">
-                    <div className="hazard-progress">
-                      <div
-                        className="hazard-bar"
-                        style={{
-                          width: `${hazards.lightning_probability * 100}%`,
-                          background: getProbColor(hazards.lightning_probability),
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <span className="hazard-meta">
-                    <b>{(hazards.lightning_probability * 100).toFixed(0)}%</b> ({hazards.lightning_strike_density_per_km2}/km²)
-                  </span>
-                </div>
-
-                {/* 3. Hail */}
-                <div className="hazard-row">
-                  <span className="hazard-name">Hail Hazard</span>
-                  <div className="hazard-meter-box">
-                    <div className="hazard-progress">
-                      <div
-                        className="hazard-bar"
-                        style={{
-                          width: `${hazards.hail_probability * 100}%`,
-                          background: getProbColor(hazards.hail_probability),
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <span className="hazard-meta">
-                    <b>{(hazards.hail_probability * 100).toFixed(0)}%</b> ({hazards.hail_estimated_size_cm}cm)
-                  </span>
-                </div>
-
-                {/* 4. Downburst */}
-                <div className="hazard-row">
-                  <span className="hazard-name">Downburst / Wind</span>
-                  <div className="hazard-meter-box">
-                    <div className="hazard-progress">
-                      <div
-                        className="hazard-bar"
-                        style={{
-                          width: `${hazards.downburst_probability * 100}%`,
-                          background: getProbColor(hazards.downburst_probability),
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <span className="hazard-meta">
-                    <b>{hazards.downburst_max_gust_kmh} km/h</b>
-                  </span>
-                </div>
-
-                {/* 5. Cloudburst */}
-                <div className="hazard-row">
-                  <span className="hazard-name">Cloudburst / Rain</span>
-                  <div className="hazard-meter-box">
-                    <div className="hazard-progress">
-                      <div
-                        className="hazard-bar"
-                        style={{
-                          width: `${hazards.cloudburst_probability * 100}%`,
-                          background: getProbColor(hazards.cloudburst_probability),
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <span className="hazard-meta">
-                    <b>{hazards.cloudburst_rate_mm_per_hr} mm/h</b> ({hazards.cloudburst_risk_level})
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* G. Local Hazard Warning Card */}
-          {warning && (
-            <div className="t-card" style={{ borderColor: warning.severity === 'SEVERE' ? '#ef4444' : '#334155' }}>
-              <div className="t-card-header">
-                <div className="t-card-title">
-                  <span>🚨</span> LOCAL HAZARD ADVISORY
-                </div>
-                <span className={`t-badge ${warning.severity.toLowerCase()}`}>{warning.severity}</span>
-              </div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc', marginBottom: 6 }}>
-                {warning.headline}
-              </div>
-              <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.4, marginBottom: 8 }}>
-                <b>Guideline:</b> {warning.operational_attention}
-              </div>
-
-              {/* Explicit WHAT / WHY / WHEN Triage Box (SIH26084 Section 11) */}
-              <div className="what-why-when-box">
-                <div className="www-head">⚡ WHAT / WHY / WHEN OPERATIONAL TRIAGE</div>
-                <div className="www-row">
-                  <div className="www-pill what">WHAT?</div>
-                  <div className="www-content">
-                    <b>{warning.what_hazard || warning.headline}</b>
+                      >
+                        {p.name.split(' ')[0]}
+                      </button>
+                    ))}
                   </div>
                 </div>
-                <div className="www-row">
-                  <div className="www-pill why">WHY?</div>
-                  <div className="www-content">
-                    <span>{warning.why_reason || warning.operational_attention}</span>
-                  </div>
-                </div>
-                <div className="www-row">
-                  <div className="www-pill when">WHEN?</div>
-                  <div className="www-content">
-                    <span>{warning.when_expected || (warning.eta_minutes ? `Imminent within ~${warning.eta_minutes} min` : 'Next 60–90 min stable')}</span>
-                  </div>
-                </div>
-              </div>
 
-              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginTop: 8 }}>
-                Valid Until: {new Date(warning.valid_until).toLocaleTimeString()} • Provenance: {warning.confidence}
-              </div>
-            </div>
-          )}
-
-          {/* H. Explainable Predictions ("Why This Alert?") */}
-          {whyAlert && (
-            <div className="t-card">
-              <div className="t-card-header">
-                <div className="t-card-title">
-                  <span>💡</span> WHY THIS ALERT? (EXPLAINABILITY)
-                </div>
-                <span className="t-badge watch">AI REASONING</span>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {whyAlert.primary_factors.map((f, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      background: 'rgba(255,255,255,0.03)',
-                      padding: 6,
-                      borderRadius: 4,
-                      fontSize: 11,
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#00d4ff', fontWeight: 600 }}>
-                      <span>{f.factor}</span>
-                      <span>{f.weight_percent}% impact</span>
-                    </div>
-                    <div style={{ color: '#cbd5e1', fontSize: 10, marginTop: 2 }}>{f.observation}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* I. Data-Source Health & Provenance Panel */}
-          <div className="t-card">
-            <div className="t-card-header">
-              <div className="t-card-title">
-                <span>📡</span> DATA-SOURCE HEALTH PANEL
-              </div>
-              <span className="t-badge watch">{mode === 'demo' ? 'SIMULATED FEEDS' : 'REAL FEEDS'}</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {health.map((h) => (
-                <div
-                  key={h.name}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: '4px 0',
-                    borderBottom: '1px solid rgba(255,255,255,0.04)',
-                    fontSize: 11,
-                  }}
-                  title={h.message || ''}
+                {/* Calculate Button */}
+                <button
+                  className="btn-calc-route"
+                  onClick={handleCalculateRoute}
+                  disabled={isRouting}
                 >
-                  <span style={{ color: '#e2e8f0' }}>{h.name}</span>
-                  <span
-                    className={`t-badge ${
-                      h.status === 'LIVE' ? 'stable' : h.status === 'DEMO' ? 'alert' : 'watch'
-                    }`}
-                  >
-                    {h.status}
-                  </span>
-                </div>
-              ))}
+                  {isRouting ? '⏳ Analyzing Route Hazard Corridor...' : '🚗 FIND LOWER-RISK ROUTE'}
+                </button>
+
+                {routeNotice && (
+                  <div style={{ fontSize: 10, color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>
+                    {routeNotice}
+                  </div>
+                )}
+              </div>
+
+              {/* ROUTE COMPARISON (Section 25.9 & 25.12) */}
+              {routeResponse && routeResponse.routes && routeResponse.routes.length > 0 && (
+                <>
+                  <div className="t-card-title" style={{ fontSize: 11, color: '#94a3b8' }}>
+                    ROUTE COMPARISON
+                  </div>
+
+                  {/* FASTEST ROUTE CARD */}
+                  {fastestRoute && (
+                    <div
+                      className={`route-comp-card ${fastestRoute.isRecommended ? 'recommended' : 'risky'}`}
+                      onClick={() => setSelectedRouteId(fastestRoute.routeId)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <div className="route-card-top">
+                        <span className="route-title-badge">FASTEST ROUTE</span>
+                        <span className={`risk-pill ${fastestRoute.riskLevel.toLowerCase()}`}>
+                          {fastestRoute.riskLevel}
+                        </span>
+                      </div>
+                      <div className="route-metrics-row">
+                        <div className="route-metric-item">
+                          <span>Travel Time</span>
+                          <b>{fastestRoute.durationMinutes} min</b>
+                        </div>
+                        <div className="route-metric-item">
+                          <span>Distance</span>
+                          <b>{fastestRoute.distanceKm} km</b>
+                        </div>
+                        <div className="route-metric-item">
+                          <span>Storm Risk</span>
+                          <b>{fastestRoute.riskScore}/100</b>
+                        </div>
+                      </div>
+                      {fastestRoute.isRecommended ? (
+                        <div className="recommended-banner">
+                          ✓ RECOMMENDED LOWER-RISK ROUTE
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 10, color: '#f87171' }}>
+                          ⚠️ Intersects approaching convective storm path
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* STORM-AWARE ROUTE CARD */}
+                  {stormAwareRoute && stormAwareRoute.routeId !== fastestRoute?.routeId && (
+                    <div
+                      className="route-comp-card recommended"
+                      onClick={() => setSelectedRouteId(stormAwareRoute.routeId)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <div className="route-card-top">
+                        <span className="route-title-badge">STORM-AWARE ROUTE</span>
+                        <span className={`risk-pill ${stormAwareRoute.riskLevel.toLowerCase()}`}>
+                          {stormAwareRoute.riskLevel}
+                        </span>
+                      </div>
+                      <div className="route-metrics-row">
+                        <div className="route-metric-item">
+                          <span>Travel Time</span>
+                          <b>{stormAwareRoute.durationMinutes} min</b>
+                        </div>
+                        <div className="route-metric-item">
+                          <span>Distance</span>
+                          <b>{stormAwareRoute.distanceKm} km</b>
+                        </div>
+                        <div className="route-metric-item">
+                          <span>Storm Risk</span>
+                          <b>{stormAwareRoute.riskScore}/100</b>
+                        </div>
+                      </div>
+                      {stormAwareRoute.tradeOffText && (
+                        <div className="tradeoff-badge">
+                          {stormAwareRoute.tradeOffText}
+                        </div>
+                      )}
+                      <div className="recommended-banner">
+                        [ RECOMMENDED LOWER-RISK ROUTE ]
+                      </div>
+                    </div>
+                  )}
+
+                  {/* WHY THIS ROUTE? EXPLAINABILITY CARD (Section 25.20) */}
+                  {stormAwareRoute && (
+                    <div className="explain-box">
+                      <div className="explain-title">WHY THIS ROUTE?</div>
+                      <div className="explain-item check">
+                        <span>✓</span>
+                        <span>{stormAwareRoute.recommendationReason}</span>
+                      </div>
+                      <div className="explain-item check">
+                        <span>✓</span>
+                        <span>Lower predicted lightning & cloudburst exposure along corridor</span>
+                      </div>
+                      <div className="explain-item check">
+                        <span>✓</span>
+                        <span>Storm trajectory moves away from this route bypass</span>
+                      </div>
+                      <div className="explain-item check">
+                        <span>✓</span>
+                        <span>Forecast confidence: {stormAwareRoute.confidence || '84%'}</span>
+                      </div>
+
+                      {fastestRoute && !fastestRoute.isRecommended && (
+                        <div style={{ marginTop: 6, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: '#f87171', marginBottom: 4 }}>
+                            FASTEST ROUTE WAS NOT SELECTED BECAUSE:
+                          </div>
+                          <div className="explain-item warning">
+                            <span>⚠️</span>
+                            <span>{fastestRoute.notSelectedReason || 'It directly intersects the predicted storm corridor within estimated travel window.'}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* FORECAST SAFETY WINDOW (Section 25.21) */}
+                  {stormAwareRoute && (
+                    <div className="safety-window-box">
+                      <div>
+                        <div className="safety-window-label">Forecast Safety Window</div>
+                        <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>
+                          Informational guidance • Not an absolute guarantee
+                        </div>
+                      </div>
+                      <div className="safety-window-val">
+                        {stormAwareRoute.safetyWindowMinutes !== null && stormAwareRoute.safetyWindowMinutes !== undefined
+                          ? `${stormAwareRoute.safetyWindowMinutes} min`
+                          : 'UNAVAILABLE'}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ROUTE SEGMENT HOVER / CLICK ANALYSIS (Section 25.11) */}
+                  {activeRoute && activeRoute.segments && activeRoute.segments.length > 0 && (
+                    <div className="t-card">
+                      <div className="t-card-header">
+                        <div className="t-card-title">
+                          <span>📍</span> ROUTE SEGMENT ANALYSIS
+                        </div>
+                        <span className="t-badge alert">{activeRoute.segments.length} SEGMENTS</span>
+                      </div>
+                      <div className="segment-list">
+                        {activeRoute.segments.map((seg) => (
+                          <div
+                            key={seg.segmentIndex}
+                            className={`segment-item ${seg.predictedRisk === 'SEVERE' || seg.predictedRisk === 'HIGH' ? 'danger' : ''}`}
+                            title={seg.reason}
+                          >
+                            <div>
+                              <b>Seg {seg.segmentIndex}</b> ({seg.distanceKm} km) • ETA: +{seg.estimatedArrivalMinutes}m
+                              <div style={{ fontSize: 9, color: '#94a3b8' }}>Grid: {seg.gridId}</div>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                              <span className={`risk-pill ${seg.predictedRisk.toLowerCase()}`} style={{ fontSize: 9 }}>
+                                {seg.predictedRisk}
+                              </span>
+                              {seg.stormETA !== null && seg.stormETA !== undefined && (
+                                <div style={{ fontSize: 9, color: '#f87171' }}>Storm: ~{seg.stormETA}m</div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-          </div>
+          )}
         </aside>
       </main>
 
@@ -1146,7 +1635,7 @@ function App() {
             {isPlaying ? '⏸ PAUSE NOWCAST' : '▶ SIMULATE 0–6H'}
           </button>
 
-          {/* 0-3h Interactive Slider (Section 7) */}
+          {/* 0-3h Interactive Slider (Section 7 & 12) */}
           <div className="slider-group">
             <div className="slider-label">
               <span>0–3H SLIDER:</span>
@@ -1195,7 +1684,7 @@ function App() {
         <div className="timeline-summary">
           <span>Active Forecast Lead Time: <b className="timeline-tag">+{forecastMinutes} min</b></span>
           <span>Coverage: <b className="timeline-tag">30 km Radius</b></span>
-          <span>Resolution: <b className="timeline-tag">1–3 km Hyper-Local</b></span>
+          <span>Resolution: <b className="timeline-tag">1–3 km Hyper-Local Grid</b></span>
         </div>
       </footer>
     </div>

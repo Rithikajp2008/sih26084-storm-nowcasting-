@@ -27,29 +27,42 @@ In strict adherence to scientific and competition integrity:
 ---
 
 ## 3. Key System Features
-1. **Interactive GIS Command Center Dashboard**:
+1. **Interactive GIS Command Center Dashboard with Auto-Zoom (SIH26084 Fix #1)**:
    * Tactical dark theme styled for meteorological and disaster command centers.
-   * Multi-basemap support (Carto Dark, Satellite Hybrid, OpenStreetMap).
-   * Layer controls: 1–3 km Hazard Grid, DWR Reflectivity colormaps, Storm Cells, 0–6h Trajectory Cone, Lightning Strikes, Convective Initiation (CI) Hotspots, and 3 km User Buffer.
-2. **Early Convective Initiation (CI) Detection**:
+   * **Automatic Location Auto-Zoom**: On startup, browser GPS resolves device coordinates and smoothly animates map zoom (`flyTo` zoom 11) to center user location, 30 km monitoring circle, and hyper-local grid.
+   * Transparent location failure behavior: if permission is denied, clearly marks location as "Selected Monitoring Region" without fabricating fake GPS coordinates.
+   * Multi-basemap support (Google Maps Roadmap, Satellite Hybrid, Google Terrain, OpenStreetMap).
+2. **1–3 km Hyper-Local Geographic Grid & State Machine (SIH26084 Fix #2)**:
+   * Dynamic 11×11 real geographic grid (~2.8 km resolution = 1–3 km, 121 cells) covering the active 30 km monitoring zone.
+   * **State A (Before Analysis)**: Subtle light charcoal/black fill (`rgba(35, 35, 35, 0.34)`), communicating telemetry ingestion & nowcasting analysis in progress.
+   * **State B (Evaluated Risk)**: Transitions dynamically to SAFE (light green `rgba(100, 190, 110, 0.30)`) or DANGER (light red `rgba(235, 80, 80, 0.30)`), driven by actual backend analysis.
+   * Interactive grid cell popups displaying storm, lightning, hail, rain, wind, and cloudburst probabilities with lead time and data provenance.
+3. **Storm-Aware Safe Route Planner (SIH26084 Section 25)**:
+   * Integrated into dashboard and Leaflet GIS map with multi-route alternative calculation (OSRM OpenStreetMap routing).
+   * **Spatial-Temporal Storm Intersect**: Matches route coordinates with the 1–3 km hazard grid and evaluates user arrival time vs predicted storm arrival time along each segment corridor.
+   * **Route Comparison**: Directly compares FASTEST ROUTE vs STORM-AWARE ROUTE (Travel Time, Distance, Storm Exposure Score 0–100, and Risk Level).
+   * **Explainability ("Why This Route?")**: Explains reasons for lower-risk route recommendation and warnings for fastest route detour trade-offs.
+   * **Forecast Safety Window**: Quantifies time buffer remaining before storm corridor intersection.
+4. **Early Convective Initiation (CI) Detection**:
    * Physics-based multi-sensor rules: Rapid cloud-top cooling (< -50°C, rate > 10°C/hr), Radar reflectivity surge (> 45 dBZ, +12 dBZ/hr), and lightning onset detection.
-3. **Storm-Cell Detection & Kinematic Tracking**:
+5. **Storm-Cell Detection & Kinematic Tracking**:
    * Cell clustering, centroid identification, intensity dBZ, speed, bearing, and future trajectory projection (+15m, +30m, +1h, +2h, +3h, +6h) with expanding uncertainty cones.
-4. **Storm Arrival Countdown & "Rain Coming?" Feature**:
+6. **Storm Arrival Countdown & "Rain Coming?" Feature**:
    * Live ticking HH:MM:SS digital countdown timer, estimated clock arrival time, distance in km, and approach vector.
    * Precipitation probability %, intensity tier, duration, and multi-horizon outlook bars.
-5. **Independent 5-Hazard Prediction (SIH26084)**:
+7. **Independent 5-Hazard Prediction (SIH26084)**:
    * **Thunderstorm**: Probability %, severity tier, arrival time.
    * **Lightning**: Flash probability %, strike density (/km²), strike trend, active strikes.
    * **Hail**: Probability %, risk level, estimated hailstone diameter (cm), affected radius.
    * **Downburst / Severe Wind**: Probability %, max gust (km/h), expected range, direction.
    * **Cloudburst / Extreme Rainfall**: Probability %, rain rate (mm/h), accumulation (mm), risk tier.
-6. **0–6 Hour Nowcast Timeline**:
-   * Interactive timeline scrubber with play/pause simulation that automatically steps through forecast horizons and advects storm cells across the map.
-7. **Explainable AI ("Why This Alert?")**:
+8. **0–3h & 0–6h Interactive Nowcast Timeline**:
+   * Interactive slider (0 to 180 min in 15 min steps) and play/pause simulation that dynamically advects storm cells and updates grid & route risk across the map.
+9. **Explainable AI ("Why This Alert?")**:
    * Relative contribution percentage breakdown of radar reflectivity, satellite cooling, lightning frequency, and surface moisture convergence.
-8. **Data-Source Health & Provenance Panel**:
-   * Real-time telemetry monitoring for all 8 system components (Radar, Satellite, Lightning, AWS, NWP, ML Engine, Database, WebSocket).
+10. **Data-Source Health & Provenance Panel**:
+    * Real-time telemetry monitoring for all system components (Radar, Satellite, Lightning, AWS, NWP, ML Engine, Database, WebSocket).
+
 
 ---
 
@@ -172,28 +185,38 @@ python ml/evaluation/evaluate_model.py --data demo/sample_data/convective_events
 ---
 
 ## 8. Automated Tests
-Run all 19 automated tests:
+Run all 25 automated unit & integration tests:
 ```bash
 $env:PYTHONPATH="."
 pytest -v
 ```
-All tests cover API endpoints, ETA calculations, storm advection, invalid coordinate rejection, convective initiation detection, multi-hazard prediction, and WebSocket streams.
+All tests verify:
+- Convective Initiation detection & multi-sensor rule fusion
+- 5-hazard prediction calculations & probability calibration
+- Rain Coming outlook & Storm Arrival countdown
+- REST & WebSocket APIs
+- 1–3 km Hyper-Local Grid generation (121 cells across 30 km radius)
+- Grid State Machine (ANALYZING -> SAFE / DANGER / DATA_UNAVAILABLE)
+- Storm-Aware Safe Route Planner POST/GET endpoints, route comparisons, temporal storm overlap, and explainability.
 
 ---
 
 ## 9. Judge Demonstration Flow (Step-by-Step)
-For an impactful Hackathon presentation, follow this sequence:
-1. **Step 1 - Open Dashboard**: Open `http://localhost:5173`. Show the dark command center aesthetic, MoES/NCMRWF header, live IST and UTC clocks, and data-source health status.
-2. **Step 2 - Review Current Weather**: Select "Chennai (Demo Hotspot)" or click anywhere on the Indian map. Observe live temperature, humidity, pressure, wind, and data provenance.
-3. **Step 3 - Inspect Approaching Storm**: On the map, observe the convective storm cell (`CELL-IN-01`) with its 56.5 dBZ reflectivity core and motion vector heading North-East.
-4. **Step 4 - Click Storm Cell**: Click the cell on the map to display telemetry: reflectivity dBZ, speed, bearing, area in km², and age.
-5. **Step 5 - Show Arrival Countdown**: Point to the **STORM ARRIVAL COUNTDOWN** card ticking in real-time (`00:18:42`, distance 12.6 km, confidence 82%).
-6. **Step 6 - Show "Rain Coming?"**: Highlight the verdict banner: `YES – HIGH PROBABILITY (82%)`, arrival in 18 min, and multi-timestep outlook bars (+15m to +6h).
-7. **Step 7 - Convective Initiation (CI)**: Open the CI card showing early signals: cloud-top cooling (-64.5°C at 16.8°C/hr) and radar core growth (+19.2 dBZ/hr).
-8. **Step 8 - Inspect The 5 Hazards**: Review independent hazard cards for Thunderstorm, Lightning, Hail (size cm), Downburst (max gust km/h), and Cloudburst (rain rate mm/h).
-9. **Step 9 - Simulate 0–6 Hour Timeline**: Click **`▶ SIMULATE 0–6H`** on the bottom scrubber. Watch the storm cell advect across the map and hazard probabilities evolve dynamically.
-10. **Step 10 - Explainability ("Why This Alert?")**: Show the percentage feature impact breakdown justifying why the warning was triggered.
-11. **Step 11 - Toggle Real Data Mode**: Click **`[Switch to Real Data]`** in the header. Show that the system honestly reports real WMO/IMD surface observations and transparently displays `NOT_CONNECTED` for unconfigured radar/satellite credentials rather than inventing fake data.
+For an impactful presentation, follow this sequence:
+1. **Step 1 - Open Dashboard & Auto-Zoom**: Open `http://localhost:8000` (or `http://localhost:5173`). Observe browser GPS auto-resolving device coordinates and smoothly animating map zoom (`flyTo` zoom 11) to center your location, the 30 km early-warning radius, and the hyper-local grid.
+2. **Step 2 - 1–3 km Hazard Grid & State Machine**: Observe the 1–3 km geographic grid cells covering the 30 km monitoring zone. Notice State A (subtle charcoal ANALYZING) transitioning to evaluated State B (SAFE light-green outside storm, DANGER light-red inside storm corridor). Click any cell to inspect storm probability, lightning, hail, rain rate, and cloudburst metrics.
+3. **Step 3 - Storm Cells & Countdown**: Click on storm cell `CELL-IN-01` to display intensity (56.5 dBZ), motion vector, and 0–6h trajectory cone. Point to the **STORM ARRIVAL COUNTDOWN** card ticking in real-time.
+4. **Step 4 - Convective Initiation & 5 Hazards**: Review early CI signals (cloud-top cooling, reflectivity surge) and independent 5-hazard cards for Thunderstorm, Lightning, Hail, Downburst, and Cloudburst.
+5. **Step 5 - Storm-Aware Safe Route Planner (Section 25)**:
+   * Click **`🚗 SAFE ROUTE PLANNER`** in the sidebar.
+   * Click **`[ Use My Current Location ]`** to automatically set origin, and select or enter a destination (e.g., Tambaram Sanatorium or Airport).
+   * Click **`[ 🚗 FIND LOWER-RISK ROUTE ]`**.
+   * Show the route comparison between **FASTEST ROUTE** (elevated storm exposure) and **STORM-AWARE ROUTE** (recommended lower-risk route).
+   * Highlight **"WHY THIS ROUTE?"** explaining how the route avoids high-risk grid cells and temporal storm collision.
+   * Point to the **Forecast Safety Window** and interactive route polylines on the map.
+6. **Step 6 - 0–3 Hour Interactive Timeline**: Move the 0–3h slider. Watch the storm advect across the grid, updating affected grid cell risk colors and route risk in real-time.
+7. **Step 7 - Toggle Real Data Mode**: Click **`[Switch to Real Data]`** in the header. Show that the system honestly reports live WMO/IMD surface observations and transparently displays `NOT_CONNECTED` for unconfigured credentials rather than inventing fake data.
+
 
 ---
 

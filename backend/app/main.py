@@ -16,6 +16,8 @@ from .core.schemas import (
     StormArrivalCountdown,
     WhyThisAlert,
     LightningStrike,
+    RouteAnalyzeRequest,
+    RouteAnalyzeResponse,
 )
 from .services.health import get_system_health
 from .services.demo import (
@@ -25,6 +27,8 @@ from .services.demo import (
     demo_convective_initiation,
     demo_current_weather,
 )
+from .services.grid import generate_hyperlocal_grid
+from .services.routing import analyze_storm_aware_routes
 from .services.nowcast import (
     eta_minutes,
     risk_label,
@@ -63,8 +67,21 @@ def _validate_coords(lat: float, lon: float) -> None:
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
         raise HTTPException(status_code=422, detail="Invalid latitude/longitude: outside coordinate limits")
 
+from pathlib import Path
+from fastapi import Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+_dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _dist_dir.exists() and (_dist_dir / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(_dist_dir / "assets")), name="frontend_assets")
+
 @app.get("/")
-async def root():
+async def root(request: Request):
+    accept = request.headers.get("accept", "")
+    dist_index = _dist_dir / "index.html"
+    if "text/html" in accept and dist_index.exists():
+        return FileResponse(dist_index)
     return {
         "service": "SIH26084 Real-Time Convective Storm Nowcasting API",
         "organization": "Ministry of Earth Sciences (MoES) / NCMRWF",
@@ -73,6 +90,8 @@ async def root():
         "resolution": "1–3 km hyper-local",
         "version": "1.0.0",
     }
+
+
 
 # ----------------- MODE & HEALTH -----------------
 
@@ -238,22 +257,121 @@ async def get_forecast_grid(
 ):
     _validate_coords(lat, lon)
     if CURRENT_DATA_MODE == "demo":
-        grid = demo_grid(minutes, lat, lon)
+        storms = demo_storms(lat, lon)
+        grid = generate_hyperlocal_grid(
+            center_lat=lat,
+            center_lon=lon,
+            minutes=minutes,
+            storms=storms,
+            mode="demo",
+        )
         return {
             "status": "success",
             "mode": "demo",
             "forecast_minutes": minutes,
-            "grid_resolution": "1–3 km spatial resolution",
+            "grid_resolution": "1–3 km hyper-local spatial resolution (30 km coverage)",
             "count": len(grid),
             "data": [g.model_dump(mode="json") for g in grid],
         }
+    
+    # Real Data Mode: Compute grid risk state from live ground truth telemetry
+    try:
+        cw = await fetch_real_current_weather(lat, lon)
+    except Exception:
+        cw = None
+
+    grid = generate_hyperlocal_grid(
+        center_lat=lat,
+        center_lon=lon,
+        minutes=minutes,
+        mode="real",
+        real_weather=cw,
+    )
     return {
-        "status": "degraded",
+        "status": "success",
         "mode": "real",
         "forecast_minutes": minutes,
-        "data": [],
-        "message": "Forecast grid requires live radar/satellite feeds; no synthetic values returned in REAL mode.",
+        "grid_resolution": "1–3 km hyper-local spatial resolution (30 km coverage)",
+        "count": len(grid),
+        "data": [g.model_dump(mode="json") for g in grid],
     }
+
+# ----------------- STORM-AWARE SAFE ROUTE PLANNER (SIH26084 Section 25) -----------------
+
+@app.post("/api/routes/analyze", response_model=RouteAnalyzeResponse)
+async def analyze_routes_post(payload: RouteAnalyzeRequest):
+    _validate_coords(payload.start.latitude, payload.start.longitude)
+    _validate_coords(payload.destination.latitude, payload.destination.longitude)
+    
+    storms = demo_storms(payload.start.latitude, payload.start.longitude) if CURRENT_DATA_MODE == "demo" else []
+    cw = None
+    if CURRENT_DATA_MODE == "real":
+        try:
+            cw = await fetch_real_current_weather(payload.start.latitude, payload.start.longitude)
+        except Exception:
+            pass
+
+    grid = generate_hyperlocal_grid(
+        center_lat=payload.start.latitude,
+        center_lon=payload.start.longitude,
+        minutes=payload.forecast_minutes or 30,
+        storms=storms,
+        mode=CURRENT_DATA_MODE,
+        real_weather=cw,
+    )
+
+    return await analyze_storm_aware_routes(
+        start_lat=payload.start.latitude,
+        start_lon=payload.start.longitude,
+        dest_lat=payload.destination.latitude,
+        dest_lon=payload.destination.longitude,
+        forecast_minutes=payload.forecast_minutes or 30,
+        mode=CURRENT_DATA_MODE,
+        storms=storms,
+        grid_cells=grid,
+        real_weather=cw,
+    )
+
+@app.get("/api/routes/analyze", response_model=RouteAnalyzeResponse)
+async def analyze_routes_get(
+    start_lat: float = Query(..., ge=-90, le=90),
+    start_lon: float = Query(..., ge=-180, le=180),
+    dest_lat: float = Query(..., ge=-90, le=90),
+    dest_lon: float = Query(..., ge=-180, le=180),
+    minutes: int = Query(30, ge=0, le=360),
+):
+    _validate_coords(start_lat, start_lon)
+    _validate_coords(dest_lat, dest_lon)
+    
+    storms = demo_storms(start_lat, start_lon) if CURRENT_DATA_MODE == "demo" else []
+    cw = None
+    if CURRENT_DATA_MODE == "real":
+        try:
+            cw = await fetch_real_current_weather(start_lat, start_lon)
+        except Exception:
+            pass
+
+    grid = generate_hyperlocal_grid(
+        center_lat=start_lat,
+        center_lon=start_lon,
+        minutes=minutes,
+        storms=storms,
+        mode=CURRENT_DATA_MODE,
+        real_weather=cw,
+    )
+
+    return await analyze_storm_aware_routes(
+        start_lat=start_lat,
+        start_lon=start_lon,
+        dest_lat=dest_lat,
+        dest_lon=dest_lon,
+        forecast_minutes=minutes,
+        mode=CURRENT_DATA_MODE,
+        storms=storms,
+        grid_cells=grid,
+        real_weather=cw,
+    )
+
 
 # ----------------- HAZARD PREDICTION -----------------
 
@@ -378,16 +496,8 @@ async def websocket_nowcast(ws: WebSocket):
         pass
 
 
-# Serve compiled React frontend if available (allows 1-click single-service cloud deploy)
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-
-_dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+# Serve compiled React frontend catch-all route
 if _dist_dir.exists() and (_dist_dir / "index.html").exists():
-    if (_dist_dir / "assets").exists():
-        app.mount("/assets", StaticFiles(directory=str(_dist_dir / "assets")), name="frontend_assets")
-
     @app.get("/{full_path:path}")
     async def serve_spa_frontend(full_path: str):
         if full_path.startswith("api") or full_path.startswith("ws") or full_path.startswith("docs") or full_path == "openapi.json":
@@ -396,3 +506,4 @@ if _dist_dir.exists() and (_dist_dir / "index.html").exists():
         if target.is_file():
             return FileResponse(target)
         return FileResponse(_dist_dir / "index.html")
+

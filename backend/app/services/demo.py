@@ -230,6 +230,8 @@ def demo_grid(minutes: int = 30, target_lat: float = 13.08, target_lon: float = 
                 strong_wind_probability=round(wind_p, 3),
                 extreme_rain_probability=round(cb_p, 3),
                 cloudburst_risk=round(cb_p, 3),
+                risk_level="DANGER" if p >= 0.40 else "SAFE",
+                status="DANGER" if p >= 0.40 else "SAFE",
                 confidence="DEMO / CALIBRATED",
                 model_version="moes-ncmrwf-nowcast-v2.1",
                 input_timestamp=now,

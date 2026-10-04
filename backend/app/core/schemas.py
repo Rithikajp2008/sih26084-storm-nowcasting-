@@ -165,6 +165,8 @@ class GridPrediction(BaseModel):
     strong_wind_probability: float
     extreme_rain_probability: float
     cloudburst_risk: float = 0.0
+    risk_level: Optional[str] = "SAFE" # "SAFE", "DANGER", "ANALYZING", "DATA_UNAVAILABLE"
+    status: Optional[str] = "SAFE"
     confidence: str
     model_version: str
     input_timestamp: datetime
@@ -202,3 +204,58 @@ class WhyThisAlert(BaseModel):
     data_provenance: Dict[str, str]
     model_version: str
     recommended_actions: List[str]
+
+# ----------------- STORM-AWARE SAFE ROUTE PLANNER SCHEMAS (SIH26084 Section 25) -----------------
+
+class RouteSegmentAnalysis(BaseModel):
+    segmentIndex: int
+    latitude: float
+    longitude: float
+    distanceKm: float
+    estimatedArrivalMinutes: float
+    gridId: str
+    currentRisk: str # "LOW", "MODERATE", "HIGH", "SEVERE", "ANALYZING"
+    predictedRisk: str # "LOW", "MODERATE", "HIGH", "SEVERE"
+    stormETA: Optional[float] = None # in minutes
+    reason: str
+
+class RouteAnalysisResult(BaseModel):
+    routeId: str
+    name: str # e.g. "Fastest Route via Arterial" or "Storm-Aware Alternative"
+    distanceKm: float
+    durationMinutes: float
+    coordinates: List[List[float]] # [[lat, lon], ...]
+    intersectedGridIds: List[str]
+    currentExposure: float # 0 to 100
+    predictedExposure: float # 0 to 100
+    stormETA: Optional[float] = None
+    stormDirection: Optional[str] = None
+    stormSpeed: Optional[float] = None
+    confidence: Optional[str] = "84%"
+    riskScore: int # 0 to 100
+    riskLevel: Literal["LOW", "MODERATE", "ELEVATED", "HIGH", "SEVERE"]
+    isRecommended: bool = False
+    recommendationReason: str
+    notSelectedReason: Optional[str] = None
+    tradeOffText: Optional[str] = None # e.g. "+6 min compared with fastest route"
+    safetyWindowMinutes: Optional[float] = None # Forecast safety window
+    dataStatus: str = "LIVE"
+    lastUpdated: datetime
+    segments: List[RouteSegmentAnalysis] = Field(default_factory=list)
+
+class RoutePoint(BaseModel):
+    latitude: float
+    longitude: float
+
+class RouteAnalyzeRequest(BaseModel):
+    start: RoutePoint
+    destination: RoutePoint
+    forecast_minutes: Optional[int] = 30
+
+class RouteAnalyzeResponse(BaseModel):
+    status: str = "OK"
+    dataStatus: str = "LIVE"
+    recommendedRouteId: Optional[str] = None
+    routes: List[RouteAnalysisResult] = Field(default_factory=list)
+    message: Optional[str] = None
+

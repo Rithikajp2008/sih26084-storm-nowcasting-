@@ -153,6 +153,8 @@ export interface GridPrediction {
   strong_wind_probability: number;
   extreme_rain_probability: number;
   cloudburst_risk: number;
+  risk_level?: 'SAFE' | 'DANGER' | 'ANALYZING' | 'DATA_UNAVAILABLE';
+  status?: string;
   confidence: string;
   model_version: string;
   input_timestamp: string;
@@ -203,3 +205,52 @@ export interface WhyThisAlert {
   model_version: string;
   recommended_actions: string[];
 }
+
+// ----------------- STORM-AWARE SAFE ROUTE PLANNER TYPES -----------------
+
+export interface RouteSegmentAnalysis {
+  segmentIndex: number;
+  latitude: number;
+  longitude: number;
+  distanceKm: number;
+  estimatedArrivalMinutes: number;
+  gridId: string;
+  currentRisk: string;
+  predictedRisk: string;
+  stormETA?: number | null;
+  reason: string;
+}
+
+export interface RouteAnalysisResult {
+  routeId: string;
+  name: string;
+  distanceKm: number;
+  durationMinutes: number;
+  coordinates: [number, number][]; // [lat, lon]
+  intersectedGridIds: string[];
+  currentExposure: number;
+  predictedExposure: number;
+  stormETA?: number | null;
+  stormDirection?: string | null;
+  stormSpeed?: number | null;
+  confidence?: string | null;
+  riskScore: number;
+  riskLevel: 'LOW' | 'MODERATE' | 'ELEVATED' | 'HIGH' | 'SEVERE';
+  isRecommended: boolean;
+  recommendationReason: string;
+  notSelectedReason?: string | null;
+  tradeOffText?: string | null;
+  safetyWindowMinutes?: number | null;
+  dataStatus: string;
+  lastUpdated: string;
+  segments: RouteSegmentAnalysis[];
+}
+
+export interface RouteAnalyzeResponse {
+  status: string;
+  dataStatus: string;
+  recommendedRouteId?: string | null;
+  routes: RouteAnalysisResult[];
+  message?: string | null;
+}
+
