@@ -14,39 +14,48 @@ from backend.app.services.demo import demo_storms
 client = TestClient(app)
 
 def test_hyperlocal_grid_generation_30km():
-    """Verifies that an 11x11 grid (~2.8 km resolution = 1-3 km) is generated around coordinates,
-    covering the 30 km monitoring radius with 121 cells.
+    """Verifies that hyper-local grid (~2.8 km resolution = 1-3 km) is generated around coordinates,
+    strictly clipped inside the authoritative 30 km monitoring circle.
     """
+    from backend.app.services.grid import haversine_km
     grid = generate_hyperlocal_grid(center_lat=13.08, center_lon=80.27, minutes=30, mode="demo", storms=demo_storms(13.08, 80.27))
-    assert len(grid) == 121
+    assert len(grid) > 0
+    
+    # Check that all cells lie inside the 30 km circle
+    for cell in grid:
+        d = haversine_km(13.08, 80.27, cell.center_latitude, cell.center_longitude)
+        assert d <= 30.5
+        for pt in cell.geometry["coordinates"][0]:
+            pt_dist = haversine_km(13.08, 80.27, pt[1], pt[0])
+            assert pt_dist <= 30.05, f"Vertex {pt} exceeds 30 km: {pt_dist} km"
     
     # Check that cells have geometry and IDs
     first = grid[0]
     assert first.grid_id.startswith("GRID-")
     assert first.geometry["type"] == "Polygon"
-    assert len(first.geometry["coordinates"][0]) == 5
+    assert len(first.geometry["coordinates"][0]) >= 4
     
     # Check that risk levels exist
     statuses = {g.risk_level for g in grid}
     assert "SAFE" in statuses or "DANGER" in statuses
 
 def test_grid_state_machine_analyzing_state():
-    """Verifies State A (ANALYZING) subtle light charcoal appearance before analysis finishes."""
+    """Verifies State A (ANALYZING) subtle appearance before analysis finishes."""
     grid_analyzing = generate_hyperlocal_grid(center_lat=13.08, center_lon=80.27, is_analyzing=True)
-    assert len(grid_analyzing) == 121
+    assert len(grid_analyzing) > 0
     for cell in grid_analyzing:
         assert cell.risk_level == "ANALYZING"
         assert cell.status == "ANALYZING"
         assert cell.storm_probability == 0.0
 
 def test_grid_endpoint_demo_and_real():
-    """Verifies GET /api/forecast and /api/grid return full 121 cells in demo mode."""
+    """Verifies GET /api/forecast and /api/grid return strictly clipped cells in demo mode."""
     res = client.get("/api/forecast?minutes=30&lat=13.08&lon=80.27")
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "success"
-    assert data["count"] == 121
-    assert len(data["data"]) == 121
+    assert data["count"] == len(data["data"])
+    assert data["count"] > 0
     assert data["data"][0]["risk_level"] in ["SAFE", "DANGER", "ANALYZING"]
 
 def test_storm_aware_route_planner_post_api():

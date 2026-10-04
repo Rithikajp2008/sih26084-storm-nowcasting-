@@ -120,7 +120,130 @@ function MapClickHandler({
   return null;
 }
 
-// Client-side fallback generator: Guarantees 121 hyper-local cells across 30 km radius are always 100% visible
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371.0;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180.0;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180.0;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180.0) * Math.cos((lat2 * Math.PI) / 180.0) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+  return R * c;
+}
+
+// Geodesically clips an axis-aligned bounding box to lie strictly inside the 30 km circle
+function clipCellPolygonToCircle(
+  centerLat: number,
+  centerLon: number,
+  minLat: number,
+  maxLat: number,
+  minLon: number,
+  maxLon: number,
+  radiusKm: number = 30.0
+): [number, number][] | null {
+  const cosLat = Math.max(Math.cos((centerLat * Math.PI) / 180.0), 0.20);
+  const x1 = (minLon - centerLon) * 111.0 * cosLat;
+  const x2 = (maxLon - centerLon) * 111.0 * cosLat;
+  const y1 = (minLat - centerLat) * 111.0;
+  const y2 = (maxLat - centerLat) * 111.0;
+
+  const rSq = radiusKm * radiusKm;
+  const xc = Math.max(x1, Math.min(0.0, x2));
+  const yc = Math.max(y1, Math.min(0.0, y2));
+  if (xc * xc + yc * yc >= rSq) return null;
+
+  const corners: [number, number][] = [
+    [x1, y1],
+    [x2, y1],
+    [x2, y2],
+    [x1, y2],
+  ];
+  const inCircle = corners.map(([cx, cy]) => cx * cx + cy * cy <= rSq + 1e-6);
+
+  if (inCircle.every(Boolean)) {
+    const coords: [number, number][] = corners.map(([cx, cy]) => [
+      Number((centerLon + cx / (111.0 * cosLat)).toFixed(5)),
+      Number((centerLat + cy / 111.0).toFixed(5)),
+    ]);
+    coords.push(coords[0]);
+    return coords;
+  }
+
+  const poly: [number, number][] = [];
+  const edges: [[number, number], [number, number]][] = [
+    [corners[0], corners[1]],
+    [corners[1], corners[2]],
+    [corners[2], corners[3]],
+    [corners[3], corners[0]],
+  ];
+
+  for (let i = 0; i < 4; i++) {
+    const [xa, ya] = edges[i][0];
+    const [xb, yb] = edges[i][1];
+    const dx = xb - xa;
+    const dy = yb - ya;
+    const A = dx * dx + dy * dy;
+    const B = 2.0 * (xa * dx + ya * dy);
+    const C = xa * xa + ya * ya - rSq;
+
+    if (inCircle[i]) {
+      poly.push([xa, ya]);
+    }
+
+    const disc = B * B - 4.0 * A * C;
+    if (disc >= 0 && A > 1e-9) {
+      const s = Math.sqrt(disc);
+      const t1 = (-B - s) / (2.0 * A);
+      const t2 = (-B + s) / (2.0 * A);
+      const ts = [t1, t2].filter((t) => t > 1e-5 && t < 1.0 - 1e-5).sort((a, b) => a - b);
+      for (const t of ts) {
+        poly.push([xa + t * dx, ya + t * dy]);
+      }
+    }
+  }
+
+  if (poly.length < 3) return null;
+
+  const outPoly: [number, number][] = [];
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const p1 = poly[i];
+    const p2 = poly[(i + 1) % n];
+    outPoly.push(p1);
+
+    const d1 = Math.sqrt(p1[0] * p1[0] + p1[1] * p1[1]);
+    const d2 = Math.sqrt(p2[0] * p2[0] + p2[1] * p2[1]);
+    if (Math.abs(d1 - radiusKm) < 0.08 && Math.abs(d2 - radiusKm) < 0.08) {
+      const ang1 = Math.atan2(p1[1], p1[0]);
+      const ang2 = Math.atan2(p2[1], p2[0]);
+      const diff = ((ang2 - ang1) % (2.0 * Math.PI) + 2.0 * Math.PI) % (2.0 * Math.PI);
+      if (diff > 0.05 && diff < Math.PI) {
+        const steps = Math.max(2, Math.floor(diff / (Math.PI / 18.0)));
+        for (let s = 1; s < steps; s++) {
+          const theta = ang1 + diff * (s / steps);
+          outPoly.push([radiusKm * Math.cos(theta), radiusKm * Math.sin(theta)]);
+        }
+      }
+    }
+  }
+
+  const resultCoords: [number, number][] = outPoly.map(([cx, cy]) => {
+    let clLat = centerLat + cy / 111.0;
+    let clLon = centerLon + cx / (111.0 * cosLat);
+    const dGeo = haversineKm(centerLat, centerLon, clLat, clLon);
+    if (dGeo > radiusKm) {
+      const scale = radiusKm / dGeo;
+      clLat = centerLat + (clLat - centerLat) * scale;
+      clLon = centerLon + (clLon - centerLon) * scale;
+    }
+    return [Number(clLon.toFixed(5)), Number(clLat.toFixed(5))];
+  });
+
+  resultCoords.push(resultCoords[0]);
+  return resultCoords;
+}
+
+// Client-side fallback generator: Guarantees 1-3 km cells exist ONLY INSIDE the 30 km circle
 function generateClientFallbackGrid(lat: number, lon: number, minutes: number = 30): GridPrediction[] {
   const cells: GridPrediction[] = [];
   const stepKm = 2.8;
@@ -128,18 +251,38 @@ function generateClientFallbackGrid(lat: number, lon: number, minutes: number = 
   const kmPerLon = 111.0 * Math.cos((lat * Math.PI) / 180.0);
   const stepLat = stepKm / kmPerLat;
   const stepLon = stepKm / kmPerLon;
-  for (let r = -5; r <= 5; r++) {
-    for (let c = -5; c <= 5; c++) {
+  const halfLat = stepLat / 2;
+  const halfLon = stepLon / 2;
+  const nowIso = new Date().toISOString();
+
+  const maxSteps = Math.ceil(30.0 / stepKm) + 2;
+  let cellIdx = 0;
+
+  for (let r = -maxSteps; r <= maxSteps; r++) {
+    for (let c = -maxSteps; c <= maxSteps; c++) {
       const cLat = Number((lat + r * stepLat).toFixed(4));
       const cLon = Number((lon + c * stepLon).toFixed(4));
-      const halfLat = stepLat / 2;
-      const halfLon = stepLon / 2;
-      const distFromCenterKm = Math.sqrt(Math.pow(r * stepKm, 2) + Math.pow(c * stepKm, 2));
-      // Convective danger core towards NE quadrant within 12km
-      const isConvectiveDanger = (r >= 0 && r <= 3 && c >= 0 && c <= 3 && distFromCenterKm <= 12);
-      const nowIso = new Date().toISOString();
+      const distFromCenterKm = haversineKm(lat, lon, cLat, cLon);
+
+      // STRICT CIRCULAR CONSTRAINT: Only include cells strictly within 30 km circle!
+      if (distFromCenterKm > 30.0) continue;
+
+      const clippedCoords = clipCellPolygonToCircle(
+        lat,
+        lon,
+        cLat - halfLat,
+        cLat + halfLat,
+        cLon - halfLon,
+        cLon + halfLon,
+        30.0
+      );
+      if (!clippedCoords) continue;
+
+      // Convective danger core towards NE quadrant within 14 km
+      const isConvectiveDanger = (r >= 0 && r <= 4 && c >= 0 && c <= 4 && distFromCenterKm <= 14);
+
       cells.push({
-        grid_id: `GRID-${String(r + 5).padStart(2, '0')}-${String(c + 5).padStart(2, '0')}`,
+        grid_id: `GRID-${String(cellIdx++).padStart(3, '0')}`,
         center_latitude: cLat,
         center_longitude: cLon,
         risk_level: isConvectiveDanger ? 'DANGER' : 'SAFE',
@@ -156,17 +299,13 @@ function generateClientFallbackGrid(lat: number, lon: number, minutes: number = 
         input_timestamp: nowIso,
         prediction_timestamp: nowIso,
         sources: ['DWR S-Band Reflectivity', 'INSAT-3D Rapid Scan', 'Ground Strike Array'],
-        reasons: isConvectiveDanger ? ['Reflectivity core > 50 dBZ', 'Deep convective updraft'] : ['Clear synoptic flow', 'Reflectivity < 20 dBZ'],
+        reasons: isConvectiveDanger
+          ? ['Reflectivity core > 50 dBZ', 'Deep convective updraft']
+          : ['Clear synoptic flow', 'Reflectivity < 20 dBZ'],
         forecast_minutes: minutes,
         geometry: {
           type: 'Polygon',
-          coordinates: [[
-            [Number((cLon - halfLon).toFixed(4)), Number((cLat - halfLat).toFixed(4))],
-            [Number((cLon + halfLon).toFixed(4)), Number((cLat - halfLat).toFixed(4))],
-            [Number((cLon + halfLon).toFixed(4)), Number((cLat + halfLat).toFixed(4))],
-            [Number((cLon - halfLon).toFixed(4)), Number((cLat - halfLat).toFixed(4))],
-            [Number((cLon - halfLon).toFixed(4)), Number((cLat - halfLat).toFixed(4))],
-          ]],
+          coordinates: [clippedCoords],
         },
       });
     }
@@ -628,84 +767,124 @@ function App() {
       <main className="cc-body">
         {/* LEFT/CENTER: GIS MAP */}
         <section className="map-viewport">
-          <div className="map-tactical-bar">
-            {/* 1-Click Detect Location Button */}
-            <button
-              className="btn-locate"
-              onClick={detectLocation}
-              disabled={isLocating}
-              title="Detect your exact GPS location via browser and auto-zoom"
-            >
-              {isLocating ? '⏳ Locating...' : '📍 My Current Location'}
-            </button>
-
-            <div className="map-control-group">
-              <span style={{ color: 'var(--text-dim)', fontWeight: 700 }}>LOCATION:</span>
-              <select
-                className="map-select"
-                value={selectedCity}
-                onChange={(e) => handleCityChange(e.target.value)}
+          <div className="map-tactical-bar" id="map-tactical-bar">
+            {/* Row 1: Primary location & map style controls */}
+            <div className="map-tactical-row row-primary">
+              <button
+                className="btn-locate"
+                onClick={detectLocation}
+                disabled={isLocating}
+                title="Auto-detect live GPS location via browser and re-center map"
+                id="btn-auto-locate"
               >
-                {CITIES.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
+                {isLocating ? '⏳ Locating...' : '📍 Auto-Detect GPS'}
+              </button>
+
+              <div className="map-control-group">
+                <span className="control-label">LOCATION:</span>
+                <select
+                  id="city-select"
+                  className="map-select city-select"
+                  value={selectedCity}
+                  onChange={(e) => handleCityChange(e.target.value)}
+                  title="Select monitoring location"
+                >
+                  {CITIES.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="map-control-group">
+                <span className="control-label">STYLE:</span>
+                <select
+                  id="map-style-select"
+                  className="map-select"
+                  value={basemap}
+                  onChange={(e) => setBasemap(e.target.value as any)}
+                  title="Select base map style"
+                >
+                  <option value="google-roadmap">Google Maps</option>
+                  <option value="google-satellite">Satellite (Hybrid)</option>
+                  <option value="google-terrain">Terrain</option>
+                  <option value="osm">OpenStreetMap</option>
+                </select>
+              </div>
+
+              <button
+                className={`btn-route-action ${sidebarTab === 'route' ? 'active' : ''}`}
+                onClick={() => setSidebarTab(sidebarTab === 'route' ? 'nowcast' : 'route')}
+                title="Open Storm-Aware Safe Route Planner (Section 16)"
+                id="btn-safe-route-planner"
+              >
+                🚗 {sidebarTab === 'route' ? 'Nowcast View' : 'Safe Route Planner'}
+              </button>
             </div>
 
-            <div className="map-control-group">
-              <span style={{ color: 'var(--text-dim)', fontWeight: 700 }}>MAP STYLE:</span>
-              <select
-                className="map-select"
-                value={basemap}
-                onChange={(e) => setBasemap(e.target.value as any)}
-              >
-                <option value="google-roadmap">Google Maps (Roadmap)</option>
-                <option value="google-satellite">Google Satellite (Hybrid)</option>
-                <option value="google-terrain">Google Terrain</option>
-                <option value="osm">OpenStreetMap Standard</option>
-              </select>
+            {/* Row 2: Visualization toggles */}
+            <div className="map-tactical-row toggles-row">
+              <label className="layer-pill-toggle radius-toggle" title="Authoritative red 30 km monitoring boundary (Section 1 & 4)">
+                <input
+                  type="checkbox"
+                  checked={show30kmRadius}
+                  onChange={(e) => setShow30kmRadius(e.target.checked)}
+                />
+                <span className="toggle-indicator red-dot"></span>
+                <span className="toggle-label text-red">30 km Radius</span>
+              </label>
+
+              <label className="layer-pill-toggle grid-toggle" title="1–3 km Hyper-Local Hazard Grid strictly clipped inside 30 km circle (Section 5 & 6)">
+                <input
+                  type="checkbox"
+                  checked={showGrid}
+                  onChange={(e) => setShowGrid(e.target.checked)}
+                />
+                <span className="toggle-indicator cyan-dot"></span>
+                <span className="toggle-label">1–3 km Grid</span>
+              </label>
+
+              <label className="layer-pill-toggle storm-toggle" title="Severe Convective Storm Cells (Section 14)">
+                <input
+                  type="checkbox"
+                  checked={showStorms}
+                  onChange={(e) => setShowStorms(e.target.checked)}
+                />
+                <span className="toggle-indicator amber-dot"></span>
+                <span className="toggle-label">Storm Cells</span>
+              </label>
+
+              <label className="layer-pill-toggle traj-toggle" title="0–6 h Storm Motion Trajectory (Section 14)">
+                <input
+                  type="checkbox"
+                  checked={showTrajectory}
+                  onChange={(e) => setShowTrajectory(e.target.checked)}
+                />
+                <span className="toggle-indicator sky-dot"></span>
+                <span className="toggle-label">0–6 h Trajectory</span>
+              </label>
+
+              <label className="layer-pill-toggle ltg-toggle" title="Ground Lightning Strikes">
+                <input
+                  type="checkbox"
+                  checked={showLightning}
+                  onChange={(e) => setShowLightning(e.target.checked)}
+                />
+                <span className="toggle-indicator yellow-dot"></span>
+                <span className="toggle-label">Lightning</span>
+              </label>
+
+              <label className="layer-pill-toggle ci-toggle" title="Convective Initiation Hotspots">
+                <input
+                  type="checkbox"
+                  checked={showCI}
+                  onChange={(e) => setShowCI(e.target.checked)}
+                />
+                <span className="toggle-indicator purple-dot"></span>
+                <span className="toggle-label">CI Hotspots</span>
+              </label>
             </div>
-
-            <label className="layer-toggle" title="Show 30 km early warning weather coverage circle">
-              <input type="checkbox" checked={show30kmRadius} onChange={(e) => setShow30kmRadius(e.target.checked)} />
-              30 km Weather Radius
-            </label>
-
-            <label className="layer-toggle" title="Toggle 1-3 km Hyper-Local Hazard Grid">
-              <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} />
-              1–3 km Hazard Grid
-            </label>
-
-            <label className="layer-toggle">
-              <input type="checkbox" checked={showStorms} onChange={(e) => setShowStorms(e.target.checked)} />
-              Storm Cells
-            </label>
-
-            <label className="layer-toggle">
-              <input type="checkbox" checked={showTrajectory} onChange={(e) => setShowTrajectory(e.target.checked)} />
-              0–6h Trajectory
-            </label>
-
-            <label className="layer-toggle">
-              <input type="checkbox" checked={showLightning} onChange={(e) => setShowLightning(e.target.checked)} />
-              Lightning Strikes
-            </label>
-
-            <label className="layer-toggle">
-              <input type="checkbox" checked={showCI} onChange={(e) => setShowCI(e.target.checked)} />
-              CI Hotspots
-            </label>
-
-            {/* Quick Switch to Route Planner */}
-            <button
-              className={`btn-locate ${sidebarTab === 'route' ? 'active' : ''}`}
-              style={{ background: sidebarTab === 'route' ? 'linear-gradient(135deg, #059669 0%, #047857 100%)' : undefined }}
-              onClick={() => setSidebarTab(sidebarTab === 'route' ? 'nowcast' : 'route')}
-            >
-              🚗 {sidebarTab === 'route' ? 'View Nowcast' : 'Safe Route Planner'}
-            </button>
           </div>
 
           {/* MAP CONTAINER - STRICT GIS LAYER ORDER (Section 9) */}
@@ -741,59 +920,58 @@ function App() {
               }}
             />
 
-            {/* Layer 2: 30 km monitoring radius */}
+            {/* Layer 2: Authoritative Geodesic 30 km Monitoring Region (RED 30 KM CIRCLE per Section 1 & 4) */}
             {show30kmRadius && (
               <Circle
                 center={[lat, lon]}
-                radius={30000} // 30,000 meters = 30 km radius
+                radius={30000} // Geodesic 30,000 meters = 30 km radius
                 pathOptions={{
-                  color: '#0284c7',
-                  weight: 2,
+                  color: '#ef4444', // Authoritative RED 30 KM CIRCLE per master prompt
+                  weight: 2.8,
                   dashArray: '6, 6',
-                  fillColor: '#38bdf8',
-                  fillOpacity: 0.08,
+                  fillColor: '#ef4444',
+                  fillOpacity: 0.03,
                 }}
               >
                 <Popup>
                   <div style={{ fontSize: 12 }}>
-                    <b style={{ color: '#0284c7' }}>📍 30 km Nowcasting Coverage Radius</b>
-                    <hr style={{ margin: '4px 0', borderColor: '#cbd5e1' }} />
+                    <b style={{ color: '#ef4444' }}>📍 30 km Authoritative Monitoring Boundary</b>
+                    <hr style={{ margin: '4px 0', borderColor: '#334155' }} />
                     <div>Center: <b>{lat.toFixed(4)}°N, {lon.toFixed(4)}°E</b></div>
-                    <div>Monitoring Area: <b>~2,827 km² around active location</b></div>
-                    <div style={{ marginTop: 4, color: '#475569' }}>Tracking thunderstorms, hail cores, downbursts & cloudbursts within 30 km.</div>
+                    <div>Monitoring Area: <b>~2,827 km² (Strict Geodesic Circle)</b></div>
+                    <div style={{ marginTop: 4, color: '#94a3b8' }}>
+                      All hyper-local grid cells, hazard detection & storm tracking exist strictly inside this 30 km circle.
+                    </div>
                   </div>
                 </Popup>
               </Circle>
             )}
 
-            {/* Inner 3 km Immediate Impact Buffer */}
-            {showBuffer && (
-              <Circle
-                center={[lat, lon]}
-                radius={3000}
-                pathOptions={{
-                  color: '#ef4444',
-                  weight: 2,
-                  dashArray: '4, 4',
-                  fillColor: '#ef4444',
-                  fillOpacity: 0.12,
-                }}
-              >
-                <Popup>3 km Immediate Convective Impact Buffer</Popup>
-              </Circle>
-            )}
-
-            {/* Layer 3: 1–3 km Hyper-Local Hazard Grid (Section 5, 6, 7) */}
+            {/* Layer 3: 1–3 km Hyper-Local Hazard Grid (Strictly Clipped to 30 km Circle per Section 1 & 5) */}
             {showGrid &&
-              grid.map((g, i) => {
-                const style = getGridStyle(g);
-                const coords = g.geometry.coordinates[0].map((pt) => [pt[1], pt[0]] as [number, number]);
-                const cellStatus = isGridAnalyzing ? 'ANALYZING' : (g.risk_level || (g.storm_probability >= 0.4 ? 'DANGER' : 'SAFE'));
-                return (
-                  <Polygon
-                    key={`${g.grid_id}-${i}`}
-                    positions={coords}
-                    pathOptions={style}
+              grid
+                .filter((g) => haversineKm(lat, lon, g.center_latitude, g.center_longitude) <= 30.0)
+                .map((g, i) => {
+                  const style = getGridStyle(g);
+                  // Map GeoJSON [lon, lat] to Leaflet [lat, lon] and strictly enforce geodesic <= 30.0 km boundary
+                  const coords: [number, number][] = g.geometry.coordinates[0].map((pt) => {
+                    const ptLon = pt[0];
+                    const ptLat = pt[1];
+                    const d = haversineKm(lat, lon, ptLat, ptLon);
+                    if (d <= 30.0) {
+                      return [ptLat, ptLon];
+                    }
+                    const scale = 30.0 / d;
+                    const clLat = lat + (ptLat - lat) * scale;
+                    const clLon = lon + (ptLon - lon) * scale;
+                    return [Number(clLat.toFixed(5)), Number(clLon.toFixed(5))];
+                  });
+                  const cellStatus = isGridAnalyzing ? 'ANALYZING' : (g.risk_level || (g.storm_probability >= 0.4 ? 'DANGER' : 'SAFE'));
+                  return (
+                    <Polygon
+                      key={`${g.grid_id}-${i}`}
+                      positions={coords}
+                      pathOptions={style}
                     eventHandlers={{
                       mouseover: (e) => {
                         const layer = e.target;

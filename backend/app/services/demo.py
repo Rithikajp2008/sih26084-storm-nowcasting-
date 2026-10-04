@@ -172,75 +172,15 @@ def demo_current_weather(lat: float, lon: float, city: str = "Chennai") -> Curre
     )
 
 def demo_grid(minutes: int = 30, target_lat: float = 13.08, target_lon: float = 80.27) -> List[GridPrediction]:
-    """Generates ~1-3 km spatial resolution hazard grid cells covering the storm footprint
-    with advection, lead-time decay, and multi-hazard probabilities.
+    """Generates ~1-3 km spatial resolution hazard grid cells covering the 30 km monitoring region
+    strictly clipped to the authoritative 30 km circle with advection, lead-time decay, and multi-hazard probabilities.
     """
-    now = datetime.now(timezone.utc)
-    out: List[GridPrediction] = []
-    
+    from .grid import generate_hyperlocal_grid
     storms = demo_storms(target_lat, target_lon)
-    storm = storms[0]
-    
-    travel_km = storm.speed_kmh * max(minutes, 0) / 60.0
-    base_lat, base_lon = project_point(
-        storm.latitude, storm.longitude, storm.direction_deg, travel_km
+    return generate_hyperlocal_grid(
+        center_lat=target_lat,
+        center_lon=target_lon,
+        minutes=minutes,
+        storms=storms,
+        mode="demo",
     )
-    
-    # 11x11 grid with 0.027 deg step (~3.0 km)
-    step_lat = 0.027
-    step_lon = 0.029
-    half_step = 0.0135
-    
-    decay = math.exp(-minutes / 240.0)
-    
-    for iy in range(-5, 6):
-        for ix in range(-5, 6):
-            lat = base_lat + iy * step_lat
-            lon = base_lon + ix * step_lon
-            d = math.hypot(ix, iy)
-            
-            p = max(0.02, min(0.98, (0.95 - math.pow(d / 7.2, 1.8)) * decay))
-            ltg_p = min(0.99, max(0.01, (p * 1.08 + 0.04) * decay))
-            hail_p = max(0.0, min(0.90, (p - 0.22) * decay))
-            rain_p = min(0.99, max(0.02, (p * 1.05) * decay))
-            wind_p = max(0.0, min(0.95, (p - 0.10) * decay))
-            cb_p = max(0.0, min(0.88, (p - 0.32) * decay))
-            
-            geom = {
-                "type": "Polygon",
-                "coordinates": [[
-                    [round(lon - half_step, 5), round(lat - half_step, 5)],
-                    [round(lon + half_step, 5), round(lat - half_step, 5)],
-                    [round(lon + half_step, 5), round(lat + half_step, 5)],
-                    [round(lon - half_step, 5), round(lat + half_step, 5)],
-                    [round(lon - half_step, 5), round(lat - half_step, 5)],
-                ]]
-            }
-            
-            out.append(GridPrediction(
-                grid_id=f"GRID-{iy+5:02d}-{ix+5:02d}",
-                center_latitude=round(lat, 5),
-                center_longitude=round(lon, 5),
-                geometry=geom,
-                forecast_minutes=minutes,
-                storm_probability=round(p, 3),
-                lightning_probability=round(ltg_p, 3),
-                hail_probability=round(hail_p, 3),
-                heavy_rain_probability=round(rain_p, 3),
-                strong_wind_probability=round(wind_p, 3),
-                extreme_rain_probability=round(cb_p, 3),
-                cloudburst_risk=round(cb_p, 3),
-                risk_level="DANGER" if p >= 0.40 else "SAFE",
-                status="DANGER" if p >= 0.40 else "SAFE",
-                confidence="DEMO / CALIBRATED",
-                model_version="moes-ncmrwf-nowcast-v2.1",
-                input_timestamp=now,
-                prediction_timestamp=now,
-                sources=["DWR-REFLECTIVITY", "INSAT-3DR-IR", "LIGHTNING-NETWORK"],
-                reasons=[
-                    f"Advected storm core at +{minutes}m (speed {storm.speed_kmh} km/h, bearing {storm.direction_deg}°)",
-                    f"Convective moisture convergence ({0.88:.2f})",
-                ],
-            ))
-            
-    return out

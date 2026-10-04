@@ -33,6 +33,15 @@ def degrees(x: float) -> float:
     from math import degrees as deg
     return deg(x)
 
+def clip_vertex_to_circle(v_lat: float, v_lon: float, c_lat: float, c_lon: float, max_radius_km: float = 30.0) -> Tuple[float, float]:
+    d = haversine_km(c_lat, c_lon, v_lat, v_lon)
+    if d <= max_radius_km:
+        return round(v_lon, 5), round(v_lat, 5)
+    scale = max_radius_km / max(d, 0.001)
+    cl_lat = c_lat + (v_lat - c_lat) * scale
+    cl_lon = c_lon + (v_lon - c_lon) * scale
+    return round(cl_lon, 5), round(cl_lat, 5)
+
 def make_grid(lat_min=settings.india_min_lat, lat_max=settings.india_max_lat, lon_min=settings.india_min_lon, lon_max=settings.india_max_lon, step_deg: float = 0.027):
     """Approximate 3 km cell centers across India region."""
     out = []
@@ -48,6 +57,112 @@ def make_grid(lat_min=settings.india_min_lat, lat_max=settings.india_max_lat, lo
         lat += step_deg
     return out
 
+def clip_cell_polygon_to_circle(
+    center_lat: float,
+    center_lon: float,
+    cell_min_lat: float,
+    cell_max_lat: float,
+    cell_min_lon: float,
+    cell_max_lon: float,
+    radius_km: float = 30.0,
+) -> Optional[List[List[float]]]:
+    """Geometrically clips an axis-aligned lat/lon bounding box to lie strictly
+    inside a geodesic 30 km circular boundary. Returns closed GeoJSON [lon, lat] coordinates,
+    or None if the cell is completely outside the 30 km circle.
+    """
+    cos_lat = max(cos(radians(center_lat)), 0.20)
+    
+    # Convert cell bounds to local tangent plane in kilometers
+    x1 = (cell_min_lon - center_lon) * 111.0 * cos_lat
+    x2 = (cell_max_lon - center_lon) * 111.0 * cos_lat
+    y1 = (cell_min_lat - center_lat) * 111.0
+    y2 = (cell_max_lat - center_lat) * 111.0
+    
+    r_sq = radius_km * radius_km
+    
+    # Check if closest point in cell to circle center is outside circle
+    xc = max(x1, min(0.0, x2))
+    yc = max(y1, min(0.0, y2))
+    if xc * xc + yc * yc >= r_sq:
+        return None
+        
+    corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    in_circle = [cx * cx + cy * cy <= r_sq + 1e-6 for cx, cy in corners]
+    
+    # If all 4 corners are inside, return full box
+    if all(in_circle):
+        coords = []
+        for cx, cy in corners:
+            lat = center_lat + cy / 111.0
+            lon = center_lon + cx / (111.0 * cos_lat)
+            coords.append([round(lon, 5), round(lat, 5)])
+        coords.append(coords[0])
+        return coords
+
+    # Otherwise, intersect the 4 rectangle edges with the circle
+    poly = []
+    edges = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    
+    for i, ((xa, ya), (xb, yb)) in enumerate(edges):
+        dx = xb - xa
+        dy = yb - ya
+        A = dx * dx + dy * dy
+        B = 2.0 * (xa * dx + ya * dy)
+        C = xa * xa + ya * ya - r_sq
+        
+        if in_circle[i]:
+            poly.append((xa, ya))
+            
+        disc = B * B - 4.0 * A * C
+        if disc >= 0 and A > 1e-9:
+            s = sqrt(disc)
+            t1 = (-B - s) / (2.0 * A)
+            t2 = (-B + s) / (2.0 * A)
+            ts = [t for t in (t1, t2) if 1e-5 < t < 1.0 - 1e-5]
+            ts.sort()
+            for t in ts:
+                poly.append((xa + t * dx, ya + t * dy))
+
+    if len(poly) < 3:
+        return None
+
+    # Insert circular arc points between consecutive points that lie on the 30 km circle boundary
+    out_poly = []
+    n = len(poly)
+    for i in range(n):
+        p1 = poly[i]
+        p2 = poly[(i + 1) % n]
+        out_poly.append(p1)
+        
+        d1 = sqrt(p1[0] * p1[0] + p1[1] * p1[1])
+        d2 = sqrt(p2[0] * p2[0] + p2[1] * p2[1])
+        
+        if abs(d1 - radius_km) < 0.08 and abs(d2 - radius_km) < 0.08:
+            ang1 = atan2(p1[1], p1[0])
+            ang2 = atan2(p2[1], p2[0])
+            diff = (ang2 - ang1) % (2.0 * 3.141592653589793)
+            if 0.05 < diff < 3.141592653589793:
+                steps = max(2, int(diff / (3.141592653589793 / 18.0)))
+                for s in range(1, steps):
+                    theta = ang1 + diff * (s / steps)
+                    out_poly.append((radius_km * cos(theta), radius_km * sin(theta)))
+
+    # Convert back to lat/lon GeoJSON coordinates
+    result_coords = []
+    for cx, cy in out_poly:
+        lat = center_lat + cy / 111.0
+        lon = center_lon + cx / (111.0 * cos_lat)
+        # Ensure geodesic distance is strictly <= radius_km (SH26084 Section 4 & 5)
+        d_geo = haversine_km(center_lat, center_lon, lat, lon)
+        if d_geo > radius_km:
+            scale = radius_km / d_geo
+            lat = center_lat + (lat - center_lat) * scale
+            lon = center_lon + (lon - center_lon) * scale
+        result_coords.append([round(lon, 5), round(lat, 5)])
+        
+    result_coords.append(result_coords[0]) # close polygon ring
+    return result_coords
+
 def generate_hyperlocal_grid(
     center_lat: float = 13.0827,
     center_lon: float = 80.2707,
@@ -56,23 +171,30 @@ def generate_hyperlocal_grid(
     mode: str = "demo",
     real_weather: Optional[CurrentWeather] = None,
     is_analyzing: bool = False,
+    radius_km: float = 30.0,
+    step_km: float = 2.8,
 ) -> List[GridPrediction]:
-    """Generates an 11x11 real geographic grid (~1-3 km resolution, 2.8 km step) centered on the active monitoring location,
-    covering the full 30 km monitoring radius (~31 km x 31 km = 121 cells).
+    """Generates a high-density 1-3 km hyper-local geographic grid (~2.8 km step)
+    strictly clipped to the authoritative 30 km monitoring circle centered at (center_lat, center_lon).
+    No active cell visually or logically extends outside the 30 km circle (SH26084 Sections 1, 4, 5, 22).
+    
     Adheres strictly to the SH26084 Grid State Machine:
-      - ANALYZING -> subtle light charcoal/black fill
-      - SAFE -> light green
-      - DANGER -> light red
-      - DATA_UNAVAILABLE -> neutral/stale indicator
+      - ANALYZING -> neutral blue/gray indication during telemetry processing
+      - SAFE -> low risk / clear flow
+      - DANGER -> convective core / squall perimeter / elevated hazard
+      - DATA_UNAVAILABLE -> neutral / explicit stale/unavailable state
     """
     now = datetime.now(timezone.utc)
     out: List[GridPrediction] = []
     
-    # Grid spacing ~2.8 km (1-3 km hyper-local resolution required by SIH26084)
-    step_lat = 0.025
-    lon_step = 0.025 / max(cos(radians(max(abs(center_lat), 1))), 0.25)
+    cos_lat = max(cos(radians(center_lat)), 0.20)
+    step_lat = step_km / 111.0
+    lon_step = step_km / (111.0 * cos_lat)
     half_lat = step_lat / 2.0
     half_lon = lon_step / 2.0
+    
+    # Search candidate range across the 30 km monitoring region
+    max_steps = int(radius_km / step_km) + 2
     
     # Active storm advection at +minutes lead time
     advected_storms = []
@@ -92,25 +214,48 @@ def generate_hyperlocal_grid(
 
     decay = max(0.3, 1.0 - (minutes / 400.0))
 
-    for iy in range(-5, 6):
-        for ix in range(-5, 6):
+    cell_index = 0
+    for iy in range(-max_steps, max_steps + 1):
+        for ix in range(-max_steps, max_steps + 1):
             cell_lat = round(center_lat + iy * step_lat, 5)
             cell_lon = round(center_lon + ix * lon_step, 5)
-            grid_id = f"GRID-{iy+5:02d}-{ix+5:02d}"
+            dist_to_center = haversine_km(center_lat, center_lon, cell_lat, cell_lon)
             
-            # GeoJSON Bounding Box Polygon
+            # Authoritative 30 km monitoring circle constraint:
+            # Candidate cell center must be within radius_km
+            if dist_to_center > radius_km:
+                continue
+            
+            # Geometrically clip cell to the exact authoritative 30.0 km circle
+            min_lat = cell_lat - half_lat
+            max_lat = cell_lat + half_lat
+            min_lon = cell_lon - half_lon
+            max_lon = cell_lon + half_lon
+            
+            clipped_coords = clip_cell_polygon_to_circle(
+                center_lat=center_lat,
+                center_lon=center_lon,
+                cell_min_lat=min_lat,
+                cell_max_lat=max_lat,
+                cell_min_lon=min_lon,
+                cell_max_lon=max_lon,
+                radius_km=radius_km,
+            )
+            
+            # Exclude any candidate cell that lies outside the 30 km circle
+            if not clipped_coords:
+                continue
+                
+            dist_to_center = haversine_km(center_lat, center_lon, cell_lat, cell_lon)
+            grid_id = f"GRID-{cell_index:03d}"
+            cell_index += 1
+            
             geom = {
                 "type": "Polygon",
-                "coordinates": [[
-                    [round(cell_lon - half_lon, 5), round(cell_lat - half_lat, 5)],
-                    [round(cell_lon + half_lon, 5), round(cell_lat - half_lat, 5)],
-                    [round(cell_lon + half_lon, 5), round(cell_lat + half_lat, 5)],
-                    [round(cell_lon - half_lon, 5), round(cell_lat + half_lat, 5)],
-                    [round(cell_lon - half_lon, 5), round(cell_lat - half_lat, 5)],
-                ]]
+                "coordinates": [clipped_coords],
             }
 
-            # State A: ANALYZING (State before real-time analysis finishes)
+            # State A: ANALYZING
             if is_analyzing:
                 out.append(GridPrediction(
                     grid_id=grid_id,
@@ -136,9 +281,8 @@ def generate_hyperlocal_grid(
                 ))
                 continue
 
-            # State B: Evaluated Real-Data or Calibrated Demo
+            # State B: Evaluated Demo Scenario
             if mode == "demo":
-                # Check proximity to advected storm cells
                 min_dist = 999.0
                 closest_storm = None
                 for st in advected_storms:
@@ -148,19 +292,16 @@ def generate_hyperlocal_grid(
                         closest_storm = st
 
                 if closest_storm and min_dist <= closest_storm["radius_km"]:
-                    # INSIDE STORM CORE -> DANGER
                     p = max(0.72, min(0.98, (0.95 - (min_dist / (closest_storm["radius_km"] + 1.0)) * 0.22) * decay))
                     risk_level = "DANGER"
                     status = "DANGER"
                     reason = f"Inside {closest_storm['cell_id']} core at +{minutes}m (dist {min_dist:.1f} km, {closest_storm['reflectivity']} dBZ)"
                 elif closest_storm and min_dist <= closest_storm["radius_km"] + 4.5:
-                    # ELEVATED PERIMETER / HAZARD BUFFER -> DANGER
                     p = max(0.42, min(0.74, (0.68 - ((min_dist - closest_storm["radius_km"]) / 4.5) * 0.25) * decay))
                     risk_level = "DANGER"
                     status = "DANGER"
                     reason = f"Convective squall buffer within 4.5 km of {closest_storm['cell_id']}"
                 else:
-                    # OUTSIDE DANGER ZONE -> SAFE
                     p = max(0.02, min(0.20, (0.12 - min(min_dist / 120.0, 0.10)) * decay))
                     risk_level = "SAFE"
                     status = "SAFE"
@@ -196,11 +337,9 @@ def generate_hyperlocal_grid(
                 ))
 
             else:
-                # REAL DATA MODE
+                # State C: Real Data Mode
                 if real_weather:
-                    dist_to_center = haversine_km(cell_lat, cell_lon, center_lat, center_lon)
                     if real_weather.status_level == "SEVERE" or real_weather.rainfall_rate_mm_h > 15.0:
-                        # Real storm active in region
                         risk_level = "DANGER"
                         status = "DANGER"
                         p = 0.82
@@ -211,7 +350,6 @@ def generate_hyperlocal_grid(
                         p = 0.65
                         reason = f"Significant precipitation reported: {real_weather.rainfall_rate_mm_h} mm/h"
                     else:
-                        # Live weather stable / clear
                         risk_level = "SAFE"
                         status = "SAFE"
                         p = 0.08

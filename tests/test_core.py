@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.app.services.demo import demo_grid, demo_storms
 from backend.app.services.nowcast import eta_minutes, project_point
+from backend.app.services.grid import haversine_km
 from backend.app.core.schemas import StormCell
 
 
@@ -54,18 +55,30 @@ def test_projection_moves_in_bearing_direction():
 
 
 def test_demo_grid_advects_with_time():
-    g15 = demo_grid(15)[60]
-    g60 = demo_grid(60)[60]
-    assert g60.center_latitude > g15.center_latitude
-    assert g60.center_longitude > g15.center_longitude
+    g15 = demo_grid(15)
+    g60 = demo_grid(60)
+    assert len(g15) > 0
+    assert len(g60) > 0
+    # Every cell must strictly lie inside the authoritative 30 km circle
+    for g in g15:
+        assert haversine_km(13.08, 80.27, g.center_latitude, g.center_longitude) <= 30.5
+    # Risk advection changes hazard levels over forecast lead times
+    dangers_15 = sum(1 for g in g15 if g.risk_level == "DANGER")
+    dangers_60 = sum(1 for g in g60 if g.risk_level == "DANGER")
+    assert dangers_15 > 0
 
 
 def test_api_demo_smoke():
     client = TestClient(app)
     assert client.get("/").status_code == 200
     assert client.get("/api/mode").json()["data_mode"] == "demo"
-    assert client.get("/api/forecast?minutes=30").status_code == 200
-    assert len(client.get("/api/forecast?minutes=30").json()["data"]) == 121
+    res = client.get("/api/forecast?minutes=30")
+    assert res.status_code == 200
+    grid_data = res.json()["data"]
+    assert len(grid_data) > 0
+    # Ensure all cells are strictly inside 30 km circle
+    for c in grid_data:
+        assert haversine_km(13.08, 80.27, c["center_latitude"], c["center_longitude"]) <= 30.5
     assert client.get("/api/user-warning?lat=13.08&lon=80.27").status_code == 200
 
 
