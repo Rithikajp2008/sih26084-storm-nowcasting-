@@ -60,29 +60,40 @@ def generate_local_warning(
 
     eta = eta_minutes(storm, lat, lon, extra_radius_km=3.0)
     hazards = compute_hazard_summary(storm, eta_min=eta, lead_time_min=int(eta) if eta else 30)
+    eta_range = (max(0.0, eta - 8.0), eta + 8.0) if eta is not None else None
 
     if eta is None:
         severity: HazardLevel = "LOW"
         status: WeatherStatusLevel = "WATCH"
         headline = f"Convective Storm {storm.cell_id} Active in Region (Track Divergent)"
         action = "Monitor localized radar/satellite updates; cell path does not directly intersect 3 km radius."
+        what_hazard = f"Convective Storm {storm.cell_id} ({storm.reflectivity_max_dbz} dBZ) detected in regional sector"
+        why_reason = f"Radar core intensity is {storm.reflectivity_max_dbz} dBZ moving at {storm.speed_kmh} km/h, but trajectory is currently divergent from your location."
+        when_expected = "No direct impact expected on current heading unless storm veers."
     elif eta <= 25:
         severity = "SEVERE"
         status = "SEVERE"
         headline = f"CRITICAL: Severe Convective Storm & Hail/Downburst Imminent within {int(round(eta))} min"
         action = "Take immediate shelter. Disconnect outdoor operations, seek grounded structures away from open areas and metallic towers."
+        what_hazard = f"Severe Convective Storm {storm.cell_id} with Hail ({hazards.hail_estimated_size_cm}cm), Severe Downburst Gusts ({hazards.downburst_max_gust_kmh} km/h), & Cloudburst Risk"
+        why_reason = f"DWR Reflectivity surged to {storm.reflectivity_max_dbz} dBZ aloft, INSAT-3DR cloud-top cooling <-60°C, and lightning strike density {hazards.lightning_strike_density_per_km2}/km²"
+        when_expected = f"Imminent arrival in {int(round(eta))} minutes (Window: {int(eta_range[0])}–{int(eta_range[1])} min); Valid until {valid_until.strftime('%H:%M')} UTC"
     elif eta <= 60:
         severity = "HIGH"
         status = "ALERT"
         headline = f"ALERT: High-Intensity Thunderstorm Cell Approaching (ETA ~{int(round(eta))} min)"
         action = "Prepare drainage systems, halt high-altitude crane activities, prepare lightning safety protocols."
+        what_hazard = f"Intense Thunderstorm with Heavy Rainfall ({hazards.cloudburst_rate_mm_per_hr} mm/h) & Lightning Activity"
+        why_reason = f"Cell moving towards location at {storm.speed_kmh} km/h along {storm.direction_compass} approach vector with active lightning strokes"
+        when_expected = f"Expected in ~{int(round(eta))} minutes; Valid until {valid_until.strftime('%H:%M')} UTC"
     else:
         severity = "MODERATE"
         status = "WATCH"
         headline = f"WATCH: Convective Storm Approaching (ETA ~{int(round(eta))} min)"
         action = "Review operational weather briefing and track radar core progression."
-
-    eta_range = (max(0.0, eta - 8.0), eta + 8.0) if eta is not None else None
+        what_hazard = f"Approaching Convective Cell ({storm.reflectivity_max_dbz} dBZ) under 0–6 hr nowcast surveillance"
+        why_reason = f"Kinematic tracking projects arrival along {storm.direction_deg}° bearing with moderate intensity"
+        when_expected = f"Estimated arrival in ~{int(round(eta))} minutes"
 
     provenance = {
         "DWR Radar Reflectivity": "Online (DWR Chennai / S-Band)" if mode == "demo" else "IMD DWR Feed",
@@ -103,6 +114,9 @@ def generate_local_warning(
         status_level=status,
         headline=headline,
         operational_attention=action,
+        what_hazard=what_hazard,
+        why_reason=why_reason,
+        when_expected=when_expected,
         risks={
             "lightning": hazards.lightning_trend if hazards.lightning_probability > 0.6 else "MODERATE",
             "heavy_rain": hazards.cloudburst_risk_level,

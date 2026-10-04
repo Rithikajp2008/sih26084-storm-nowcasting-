@@ -32,6 +32,7 @@ export interface StormCell {
   speed_kmh: number;
   growth_rate: number;
   decay_rate: number;
+  trend?: 'INTENSIFYING' | 'STABLE' | 'WEAKENING';
   age_minutes: number;
   severity: 'LOW' | 'MODERATE' | 'HIGH' | 'SEVERE';
   trajectory: TrajectoryPoint[];
@@ -171,6 +172,9 @@ export interface UserWarning {
   status_level: 'STABLE' | 'WATCH' | 'ALERT' | 'SEVERE';
   headline: string;
   operational_attention: string;
+  what_hazard?: string;
+  why_reason?: string;
+  when_expected?: string;
   risks: {
     lightning: string;
     heavy_rain: string;

@@ -47,6 +47,7 @@ class StormCell(BaseModel):
     speed_kmh: float
     growth_rate: float = 0.0
     decay_rate: float = 0.0
+    trend: Literal["INTENSIFYING", "STABLE", "WEAKENING"] = "INTENSIFYING"
     age_minutes: int = 10
     severity: HazardLevel = "HIGH"
     trajectory: List[TrajectoryPoint] = Field(default_factory=list)
@@ -182,6 +183,9 @@ class UserWarning(BaseModel):
     status_level: WeatherStatusLevel = "STABLE"
     headline: str = "Normal Conditions"
     operational_attention: str = "Standard monitoring"
+    what_hazard: Optional[str] = "Normal meteorological conditions; no severe storm cell in buffer"
+    why_reason: Optional[str] = "Atmospheric baseline stable; radar cores < 30 dBZ"
+    when_expected: Optional[str] = "Next 60–90 min stable"
     risks: Dict[str, str]
     hazard_summary: Optional[HazardSummary] = None
     convective_initiation: Optional[ConvectiveInitiationSignal] = None

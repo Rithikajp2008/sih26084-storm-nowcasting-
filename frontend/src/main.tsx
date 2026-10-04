@@ -575,9 +575,15 @@ function App() {
                     }}
                   >
                     <Popup>
-                      <div style={{ fontSize: 12, minWidth: 180 }}>
-                        <b style={{ color: '#f87171' }}>{s.cell_id}</b> ({s.severity})
+                      <div style={{ fontSize: 12, minWidth: 200 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                          <b style={{ color: '#f87171' }}>{s.cell_id}</b>
+                          <span className={`storm-trend-badge ${s.trend?.toLowerCase() || 'intensifying'}`}>
+                            {s.trend === 'INTENSIFYING' ? '🔥 INTENSIFYING' : s.trend === 'WEAKENING' ? '📉 WEAKENING' : '⚖️ STABLE'}
+                          </span>
+                        </div>
                         <hr style={{ margin: '4px 0', borderColor: '#475569' }} />
+                        <div>Severity: <b>{s.severity}</b></div>
                         <div>Reflectivity: <b>{s.reflectivity_max_dbz} dBZ</b></div>
                         <div>Motion: <b>{s.speed_kmh} km/h @ {s.direction_deg}° ({s.direction_compass})</b></div>
                         <div>Area: <b>{s.area_km2} km²</b> (Radius: {s.radius_km} km)</div>
@@ -761,6 +767,43 @@ function App() {
               </div>
             )}
           </div>
+
+          {/* Active Storms & Trend Tracking (SIH26084 Section 6) */}
+          {storms.length > 0 && (
+            <div className="t-card">
+              <div className="t-card-header">
+                <div className="t-card-title">
+                  <span>🌀</span> STORM CELLS & TREND TRACKING
+                </div>
+                <span className="t-badge alert">{storms.length} ACTIVE</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {storms.map((st) => (
+                  <div
+                    key={st.cell_id}
+                    style={{
+                      background: 'rgba(255,255,255,0.03)',
+                      padding: '8px 10px',
+                      borderRadius: 6,
+                      border: '1px solid rgba(255,255,255,0.06)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <b style={{ color: '#f87171', fontSize: 12 }}>{st.cell_id}</b>
+                      <span className={`storm-trend-badge ${st.trend?.toLowerCase() || 'intensifying'}`}>
+                        {st.trend === 'INTENSIFYING' ? '🔥 INTENSIFYING' : st.trend === 'WEAKENING' ? '📉 WEAKENING' : '⚖️ STABLE'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Core: <b style={{ color: '#ec4899' }}>{st.reflectivity_max_dbz} dBZ</b></span>
+                      <span>Motion: <b>{st.speed_kmh} km/h @ {st.direction_compass}</b></span>
+                      <span>Radius: <b>{st.radius_km} km</b></span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* C. "Rain Coming?" Feature */}
           <div className="t-card">
@@ -998,7 +1041,31 @@ function App() {
               <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.4, marginBottom: 8 }}>
                 <b>Guideline:</b> {warning.operational_attention}
               </div>
-              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+
+              {/* Explicit WHAT / WHY / WHEN Triage Box (SIH26084 Section 11) */}
+              <div className="what-why-when-box">
+                <div className="www-head">⚡ WHAT / WHY / WHEN OPERATIONAL TRIAGE</div>
+                <div className="www-row">
+                  <div className="www-pill what">WHAT?</div>
+                  <div className="www-content">
+                    <b>{warning.what_hazard || warning.headline}</b>
+                  </div>
+                </div>
+                <div className="www-row">
+                  <div className="www-pill why">WHY?</div>
+                  <div className="www-content">
+                    <span>{warning.why_reason || warning.operational_attention}</span>
+                  </div>
+                </div>
+                <div className="www-row">
+                  <div className="www-pill when">WHEN?</div>
+                  <div className="www-content">
+                    <span>{warning.when_expected || (warning.eta_minutes ? `Imminent within ~${warning.eta_minutes} min` : 'Next 60–90 min stable')}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginTop: 8 }}>
                 Valid Until: {new Date(warning.valid_until).toLocaleTimeString()} • Provenance: {warning.confidence}
               </div>
             </div>
@@ -1078,6 +1145,37 @@ function App() {
           <button className="btn-play" onClick={() => setIsPlaying(!isPlaying)}>
             {isPlaying ? '⏸ PAUSE NOWCAST' : '▶ SIMULATE 0–6H'}
           </button>
+
+          {/* 0-3h Interactive Slider (Section 7) */}
+          <div className="slider-group">
+            <div className="slider-label">
+              <span>0–3H SLIDER:</span>
+              <b>+{Math.min(forecastMinutes, 180)}m</b>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="180"
+              step="15"
+              value={Math.min(forecastMinutes, 180)}
+              onChange={(e) => {
+                setForecastMinutes(Number(e.target.value));
+                setIsPlaying(false);
+              }}
+              className="nowcast-slider"
+              title="Slide between 0 and 3 hours for detailed hyper-local prediction"
+            />
+            <div className="slider-ticks">
+              <span>0h</span>
+              <span>+30m</span>
+              <span>+1h</span>
+              <span>+1.5h</span>
+              <span>+2h</span>
+              <span>+2.5h</span>
+              <span>+3h</span>
+            </div>
+          </div>
+
           <div className="timeline-buttons">
             {[15, 30, 60, 120, 180, 240, 360].map((t) => (
               <button
